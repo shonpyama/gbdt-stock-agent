@@ -12,6 +12,7 @@ from .colab import restore_runtime_from_drive, sync_runtime_to_drive
 from .config import load_config
 from .fmp_client import FMPClient, cache_key, resolve_fmp_api_key
 from .migrate import pack_bundle, restore_bundle
+from .operations import collect_ops_status, write_ops_snapshot
 from .orchestrator import run_pipeline
 from .paths import ProjectPaths
 from .reporting import render_report_md, write_report
@@ -157,6 +158,31 @@ def cmd_colab_sync(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_ops_status(args: argparse.Namespace) -> int:
+    project_dir = _project_dir_from_cwd()
+    payload = collect_ops_status(
+        project_dir=project_dir,
+        run_id=args.run_id,
+        max_age_hours=float(args.max_age_hours),
+        require_gpu=bool(args.require_gpu),
+    )
+    print(json.dumps(payload, indent=2, ensure_ascii=True))
+    return 0 if bool(payload.get("ok")) else 1
+
+
+def cmd_ops_snapshot(args: argparse.Namespace) -> int:
+    project_dir = _project_dir_from_cwd()
+    payload = collect_ops_status(
+        project_dir=project_dir,
+        run_id=args.run_id,
+        max_age_hours=float(args.max_age_hours),
+        require_gpu=bool(args.require_gpu),
+    )
+    out = write_ops_snapshot(project_dir=project_dir, payload=payload)
+    print(str(out))
+    return 0 if bool(payload.get("ok")) else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="gbdt_agent.cli")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -203,6 +229,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_cs = colab_sub.add_parser("sync")
     p_cs.add_argument("--drive-path", default="/content/drive/MyDrive/gbdt-stock-agent")
     p_cs.set_defaults(func=cmd_colab_sync)
+
+    p_ops = sub.add_parser("ops-status")
+    p_ops.add_argument("--run-id", default=None)
+    p_ops.add_argument("--max-age-hours", type=float, default=72.0)
+    p_ops.add_argument("--require-gpu", action="store_true")
+    p_ops.set_defaults(func=cmd_ops_status)
+
+    p_ops_snap = sub.add_parser("ops-snapshot")
+    p_ops_snap.add_argument("--run-id", default=None)
+    p_ops_snap.add_argument("--max-age-hours", type=float, default=72.0)
+    p_ops_snap.add_argument("--require-gpu", action="store_true")
+    p_ops_snap.set_defaults(func=cmd_ops_snapshot)
 
     return p
 

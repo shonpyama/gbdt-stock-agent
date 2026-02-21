@@ -15,14 +15,18 @@ def test_local_drive_sync_roundtrip(tmp_path: Path) -> None:
 
     (local_root / "data" / "cache_http").mkdir(parents=True, exist_ok=True)
     (local_root / "state").mkdir(parents=True, exist_ok=True)
+    (local_root / "reports").mkdir(parents=True, exist_ok=True)
     (local_root / "data" / "cache_http" / "x.json").write_text("{}")
     (local_root / "state" / "last_run_state.json").write_text("{}")
+    (local_root / "reports" / "r.md").write_text("# report")
 
     sync_stats = sync_runtime_to_drive(local_root=local_root, drive_path=drive_root)
-    assert sync_stats["copied_files"] >= 2
+    assert sync_stats["copied_files"] >= 3
 
     # remove local and restore from drive
     (local_root / "data" / "cache_http" / "x.json").unlink()
+    (local_root / "reports" / "r.md").unlink()
     restore_stats = restore_runtime_from_drive(local_root=local_root, drive_path=drive_root)
-    assert restore_stats["copied_files"] >= 1
+    assert restore_stats["copied_files"] >= 2
     assert (local_root / "data" / "cache_http" / "x.json").exists()
+    assert (local_root / "reports" / "r.md").exists()

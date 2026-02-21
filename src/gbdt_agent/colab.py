@@ -19,6 +19,7 @@ SYNC_DIRS = (
     "artifacts/runs",
     "state",
     "logs",
+    "reports",
 )
 
 

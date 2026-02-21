@@ -30,6 +30,8 @@ python -m gbdt_agent.cli run --conf conf/default.yaml --resume
 - `python -m gbdt_agent.cli migrate restore --archive <zip>`
 - `python -m gbdt_agent.cli colab restore --drive-path <path>`
 - `python -m gbdt_agent.cli colab sync --drive-path <path>`
+- `python -m gbdt_agent.cli ops-status --max-age-hours 72 --require-gpu`
+- `python -m gbdt_agent.cli ops-snapshot --max-age-hours 72 --require-gpu`
 
 ## ディレクトリ
 - `src/gbdt_agent`: 実装本体
@@ -37,6 +39,12 @@ python -m gbdt_agent.cli run --conf conf/default.yaml --resume
 - `artifacts/runs/<run_id>/`: 実行成果物
 - `state/last_run_state.json`: 再開状態
 - `reports/`: 差分/レビュー/移行前報告
+
+## 運用
+- 健全性チェック: `python -m gbdt_agent.cli ops-status --max-age-hours 72 --require-gpu`
+- スナップショット保存: `python -m gbdt_agent.cli ops-snapshot --max-age-hours 72 --require-gpu`
+- 一括運用（preflight→run→report→snapshot→sync）: `scripts/ops_autopilot.sh`
+- `colab sync` は `reports/` を含めて同期するため、差分・レビュー・運用記録もDriveへ保存されます。
 
 ## 注意
 - APIキーは `FMP_API_KEY` を優先し、未設定時は `/content/.env_fmp`（または `FMP_API_KEY_FILE` 指定ファイル）を参照します。
