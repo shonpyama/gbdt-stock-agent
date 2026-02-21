@@ -53,6 +53,8 @@ python run_ranker_local.py AAPL,MSFT    # 銘柄指定
 python display_report.py
 # ゲート判定JSONを再生成
 python evaluate_review_gate.py
+# 最新実行マニフェスト(成果物・ログ・git状態)を確認
+cat outputs/reports/latest_run_manifest.json
 # ゲートFAIL時にパラメータを自動で切り替えて再試行
 ./auto_improve_loop.sh AAPL,MSFT,NVDA,AMZN,META
 # 現在状態(差分・ログ・最新成果物)をDrive上にチェックポイント保存

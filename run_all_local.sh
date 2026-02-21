@@ -248,4 +248,77 @@ if [[ "$STRICT_GATE" == "1" ]]; then
   echo "Strict review gate enabled."
   GATE_CMD+=(--strict)
 fi
+GATE_RC=0
+set +e
 "${GATE_CMD[@]}"
+GATE_RC=$?
+set -e
+
+echo "[6/6] Writing run manifest"
+python - "$DETAIL_REPORT" "$RANKER_REPORT" "$LOG_PATH" "$SYMBOLS" "$STRICT_GATE" "$GATE_RC" <<'PY'
+import json
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+detail_report = sys.argv[1]
+ranker_report = sys.argv[2]
+log_path = sys.argv[3]
+symbols = sys.argv[4]
+strict_gate = sys.argv[5]
+gate_rc = int(sys.argv[6])
+
+def git_out(args: list[str]) -> str:
+    try:
+        return (
+            subprocess.check_output(["git", *args], stderr=subprocess.DEVNULL, text=True)
+            .strip()
+        )
+    except Exception:
+        return ""
+
+gate_data = {}
+gate_path = Path("outputs/reports/latest_gate.json")
+if gate_path.exists():
+    try:
+        gate_data = json.loads(gate_path.read_text(encoding="utf-8"))
+    except Exception:
+        gate_data = {}
+
+manifest = {
+    "generated_at": datetime.now(timezone.utc).isoformat(),
+    "symbols": symbols,
+    "strict_review_gate": strict_gate == "1",
+    "gate_exit_code": gate_rc,
+    "gate_status": gate_data.get("status"),
+    "gate_reasons": gate_data.get("reasons", []),
+    "artifacts": {
+        "detailed_report": detail_report if detail_report else "",
+        "ranker_report": ranker_report if ranker_report else "",
+        "comparison_report": "outputs/reports/latest_comparison.json",
+        "gate_report": "outputs/reports/latest_gate.json",
+        "log_path": log_path,
+    },
+    "git": {
+        "branch": git_out(["rev-parse", "--abbrev-ref", "HEAD"]),
+        "head": git_out(["rev-parse", "HEAD"]),
+        "status_short": git_out(["status", "--short"]),
+    },
+}
+
+out_dir = Path("outputs/reports")
+out_dir.mkdir(parents=True, exist_ok=True)
+ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+manifest_path = out_dir / f"run_manifest_{ts}.json"
+manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+(out_dir / "latest_run_manifest.json").write_text(
+    json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+)
+print(f"Saved run manifest: {manifest_path}")
+print("Saved run manifest alias: outputs/reports/latest_run_manifest.json")
+PY
+
+if [[ "$STRICT_GATE" == "1" && "$GATE_RC" -ne 0 ]]; then
+  exit "$GATE_RC"
+fi

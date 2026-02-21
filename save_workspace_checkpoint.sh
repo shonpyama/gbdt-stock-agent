@@ -33,6 +33,7 @@ cp -f outputs/reports/latest_detailed_report.json "$OUT_DIR/reports/" 2>/dev/nul
 cp -f outputs/reports/latest_comparison.json "$OUT_DIR/reports/" 2>/dev/null || true
 cp -f outputs/reports/latest_gate.json "$OUT_DIR/reports/" 2>/dev/null || true
 cp -f outputs/reports/latest_improve_attempts.json "$OUT_DIR/reports/" 2>/dev/null || true
+cp -f outputs/reports/latest_run_manifest.json "$OUT_DIR/reports/" 2>/dev/null || true
 
 if ls outputs/logs/*.log >/dev/null 2>&1; then
   ls -1t outputs/logs/*.log | head -n 5 | while IFS= read -r f; do
