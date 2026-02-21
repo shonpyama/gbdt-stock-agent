@@ -30,6 +30,12 @@ fi
 cleanup() {
   local rc=$?
   set +e
+  if [[ -f .git/CHERRY_PICK_HEAD ]]; then
+    git cherry-pick --abort >/dev/null 2>&1 || true
+  fi
+  if [[ -d .git/rebase-merge || -d .git/rebase-apply ]]; then
+    git rebase --abort >/dev/null 2>&1 || true
+  fi
   git checkout main >/dev/null 2>&1 || true
   if [[ "$had_changes" -eq 1 ]]; then
     local stash_ref
@@ -43,8 +49,24 @@ cleanup() {
 }
 trap cleanup EXIT
 
+if [[ -f .git/CHERRY_PICK_HEAD ]]; then
+  git cherry-pick --abort >/dev/null 2>&1 || true
+fi
+if [[ -d .git/rebase-merge || -d .git/rebase-apply ]]; then
+  git rebase --abort >/dev/null 2>&1 || true
+fi
+
 git fetch "$REMOTE" "$BRANCH"
 git checkout -B "$TMP_BRANCH" "$REMOTE/$BRANCH" >/dev/null
+if git merge-base --is-ancestor "$COMMIT" "$REMOTE/$BRANCH"; then
+  echo "Commit $COMMIT is already reachable from $REMOTE/$BRANCH. Nothing to push."
+  exit 0
+fi
 git cherry-pick "$COMMIT"
+if [[ -f .git/CHERRY_PICK_HEAD ]]; then
+  if git diff --cached --quiet; then
+    git cherry-pick --skip >/dev/null 2>&1 || true
+  fi
+fi
 git push "$REMOTE" "$TMP_BRANCH:$BRANCH"
 echo "Pushed $COMMIT to $REMOTE/$BRANCH via $TMP_BRANCH"
