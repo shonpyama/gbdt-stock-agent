@@ -42,6 +42,10 @@ export FMP_API_KEY="your_api_key"
 # 依存関係インストール + スモーク実行
 ./setup_local.sh
 
+# GBDT専用導線（GNNを使わない）
+./run_gbdt_only.sh AAPL,MSFT,NVDA quick
+./run_gbdt_only.sh AAPL,MSFT,NVDA,AMZN,META improve
+
 # 実行（結果は ./outputs/ に保存）
 ./run_all_local.sh AAPL,MSFT,NVDA       # パイプライン+ランカー+比較
 # レビューゲートを失敗時exit=1にする場合

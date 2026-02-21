@@ -214,12 +214,15 @@ else:
 cmp_date_d = cmp.get("pipeline_date")
 cmp_date_r = cmp.get("ranker_date")
 if cmp_date_d and cmp_date_r and cmp_date_d == cmp_date_r:
+    top_d = cmp.get("pipeline_top5") or []
+    top_r = cmp.get("ranker_top5") or []
+    effective_min_overlap = min(3, len(top_d), len(top_r))
     overlap_count = int(cmp.get("overlap_count", 0))
     pos_match = cmp.get("position_match")
     rank_corr = cmp.get("rank_corr")
-    if overlap_count < 3:
+    if overlap_count < effective_min_overlap:
         needs_review = True
-        review_reasons.append(f"overlap_count<3 ({overlap_count})")
+        review_reasons.append(f"overlap_count<{effective_min_overlap} ({overlap_count})")
     if pos_match is not None and pos_match < 2:
         needs_review = True
         review_reasons.append(f"position_match<2 ({pos_match})")

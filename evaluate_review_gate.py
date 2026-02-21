@@ -56,10 +56,13 @@ def evaluate_gate(
     rank_corr = comp.get("rank_corr")
     if cmp_date_d and cmp_date_r and cmp_date_d == cmp_date_r:
         cmp_used = True
+        top_d = comp.get("pipeline_top5") or []
+        top_r = comp.get("ranker_top5") or []
+        effective_min_overlap = min(min_overlap, len(top_d), len(top_r))
         overlap_i = int(overlap_count or 0)
-        if overlap_i < min_overlap:
+        if overlap_i < effective_min_overlap:
             needs_review = True
-            reasons.append(f"overlap_count<{min_overlap} ({overlap_i})")
+            reasons.append(f"overlap_count<{effective_min_overlap} ({overlap_i})")
         if position_match is not None and int(position_match) < min_position_match:
             needs_review = True
             reasons.append(f"position_match<{min_position_match} ({position_match})")
