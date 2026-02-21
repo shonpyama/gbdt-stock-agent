@@ -1,0 +1,75 @@
+project:
+  project_dir: ""
+run:
+  seed: 42
+  log_level: "INFO"
+  timezone_assumption: "US/Eastern; events_effective=next_trading_day"
+universe:
+  name: "smoke_custom10"
+  provider: "custom_list"
+  fallback_small50:
+    enabled: false
+    symbols: []
+data:
+  start_date: "2024-01-01"
+  end_date: "2024-09-30"
+  adjusted_flag: false
+  endpoints_version:
+    - "prices_eod"
+    - "dividends"
+    - "splits"
+  include_news: false
+fmp:
+  base_url: "https://financialmodelingprep.com/stable"
+  timeout: 30
+  endpoints:
+    prices_eod: "historical-price-eod/full"
+    dividends: "dividends"
+    splits: "splits"
+  rate_limit:
+    max_calls_per_minute: 300
+  retry:
+    max_attempts: 4
+    backoff_base_seconds: 0.5
+validation:
+  thresholds:
+    missing_ratio_max: 0.2
+    anomaly_row_ratio_max: 0.2
+    duplicates_ratio_max: 0.0
+    min_obs_per_symbol: 80
+    min_symbols_after_filter: 5
+    adjclose_missing_ratio_max: 0.2
+    price_jump_threshold: 0.5
+    volume_zero_streak_len: 5
+    volume_zero_streak_ratio_max: 0.2
+features:
+  lookbacks: [1, 5, 20]
+  event_safe_shift_days: 1
+labels:
+  horizon_trading_days: 20
+split:
+  walkforward:
+    train: 60
+    val: 10
+    test: 10
+    step: 10
+  purge: 5
+  embargo: 2
+  leakage:
+    corr_threshold: 0.999
+models:
+  gbdt:
+    enabled: true
+    framework: "lightgbm"
+    params:
+      n_estimators: 300
+      learning_rate: 0.05
+      num_leaves: 31
+backtest:
+  long_short: false
+  topn: 5
+  max_names: 5
+  single_name_cap: 0.3
+  rebalance: "daily"
+  notional: 1000000.0
+cost_model: "conf/cost_model.yaml"
