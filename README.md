@@ -65,6 +65,8 @@ cat outputs/reports/latest_run_manifest.json
 ./save_workspace_checkpoint.sh manual
 # dirtyワークツリーでもコミット1件を安全にpush
 ./push_commit_safely.sh origin main HEAD
+# 既にorigin/mainに含まれるコミットを指定した場合は何もせず終了
+./push_commit_safely.sh origin main 7469eb7
 ```
 
 **保存先**: `./outputs/csv/`, `./outputs/reports/`
