@@ -57,6 +57,15 @@ def _safe_float(value: Any) -> Optional[float]:
         return None
 
 
+def _safe_int(value: Any) -> Optional[int]:
+    try:
+        if value is None:
+            return None
+        return int(float(value))
+    except Exception:
+        return None
+
+
 def load_ops_policy(policy_path: Optional[Path]) -> Dict[str, Any]:
     merged: Dict[str, Any] = json.loads(json.dumps(DEFAULT_OPS_POLICY))
     if policy_path is None:
@@ -84,19 +93,41 @@ def collect_ops_status(
     metrics: Dict[str, Any] = {}
     metrics_path: Optional[Path] = None
     report_path: Optional[Path] = None
+    manifest: Dict[str, Any] = {}
+    manifest_path: Optional[Path] = None
     if isinstance(selected_run_id, str) and selected_run_id:
         run_dir = paths.run_dir(selected_run_id)
         metrics_path = run_dir / "metrics.json"
         report_path = run_dir / "report.md"
+        manifest_path = run_dir / "artifact_manifest.json"
         metrics = _read_json(metrics_path)
+        manifest = _read_json(manifest_path)
+
+    # last_run_state.json reflects only the latest run, so only trust it for matching run_id.
+    state_for_run = (
+        state
+        if (
+            isinstance(selected_run_id, str)
+            and selected_run_id
+            and isinstance(state, dict)
+            and str(state.get("run_id", "")) == selected_run_id
+        )
+        else {}
+    )
 
     now = datetime.now(timezone.utc)
-    updated_at_dt = _parse_iso_utc((state or {}).get("updated_at")) or _parse_iso_utc((metrics or {}).get("updated_at"))
+    updated_at_dt = (
+        _parse_iso_utc((state_for_run or {}).get("updated_at"))
+        or _parse_iso_utc((metrics or {}).get("updated_at"))
+        or _parse_iso_utc((manifest or {}).get("generated_at"))
+    )
+    if updated_at_dt is None and metrics_path and metrics_path.exists():
+        updated_at_dt = datetime.fromtimestamp(metrics_path.stat().st_mtime, tz=timezone.utc)
     age_hours: Optional[float] = None
     if updated_at_dt is not None:
         age_hours = max(0.0, (now - updated_at_dt).total_seconds() / 3600.0)
 
-    stage = str((state or {}).get("stage", ""))
+    stage = str((state_for_run or {}).get("stage", "") or (manifest or {}).get("stage", ""))
     status = str((metrics or {}).get("status", ""))
     active_errors = (metrics or {}).get("errors")
     if not isinstance(active_errors, list):
@@ -134,7 +165,7 @@ def collect_ops_status(
         "max_age_hours": float(max_age_hours),
         "require_gpu": bool(require_gpu),
         "accelerator": accelerator,
-        "last_data_date": (state or {}).get("last_data_date"),
+        "last_data_date": (state_for_run or {}).get("last_data_date") or (metrics or {}).get("last_data_date"),
         "validation_passed": validation.get("passed"),
         "leakage_passed": leakage.get("passed"),
         "backtest_summary": {
@@ -143,7 +174,7 @@ def collect_ops_status(
             "total_return": _safe_float(backtest_summary.get("total_return")),
             "avg_turnover": _safe_float(backtest_summary.get("avg_turnover")),
             "avg_cost": _safe_float(backtest_summary.get("avg_cost")),
-            "days": int(backtest_summary.get("days", 0)) if str(backtest_summary.get("days", "")).strip() else None,
+            "days": _safe_int(backtest_summary.get("days")),
         },
         "active_error_count": len(active_errors),
         "historical_error_count": len((metrics or {}).get("historical_errors") or []),
@@ -154,6 +185,7 @@ def collect_ops_status(
             "state": str(paths.state_dir / "last_run_state.json"),
             "metrics": str(metrics_path) if metrics_path else None,
             "report": str(report_path) if report_path else None,
+            "manifest": str(manifest_path) if manifest_path else None,
         },
     }
 

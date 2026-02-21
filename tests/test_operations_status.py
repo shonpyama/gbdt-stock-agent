@@ -107,3 +107,54 @@ def test_collect_ops_status_detects_stale_and_failures(tmp_path: Path) -> None:
     incident = write_ops_incident(project_dir=tmp_path, payload=gate)
     assert incident.exists()
     assert (tmp_path / "logs" / "ops" / incident.name).exists()
+
+
+def test_collect_ops_status_run_id_uses_run_local_stage_not_last_state(tmp_path: Path) -> None:
+    run_id = "r_old"
+    # last_run_state points to another run; selected run should not use this stage.
+    _write_json(
+        tmp_path / "state" / "last_run_state.json",
+        {
+            "run_id": "r_new",
+            "stage": "stage_80_report_ready",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+    _write_json(
+        tmp_path / "artifacts" / "runs" / run_id / "metrics.json",
+        {"status": "success", "errors": []},
+    )
+    _write_json(
+        tmp_path / "artifacts" / "runs" / run_id / "artifact_manifest.json",
+        {"stage": "stage_50_models_trained", "generated_at": datetime.now(timezone.utc).isoformat()},
+    )
+    (tmp_path / "artifacts" / "runs" / run_id / "report.md").write_text("# report")
+
+    payload = collect_ops_status(project_dir=tmp_path, run_id=run_id, max_age_hours=24, require_gpu=False)
+    assert payload["stage"] == "stage_50_models_trained"
+    assert payload["checks"]["stage_80_ready"] is False
+
+
+def test_collect_ops_status_handles_non_numeric_days(tmp_path: Path) -> None:
+    run_id = "r_days"
+    _write_json(
+        tmp_path / "state" / "last_run_state.json",
+        {
+            "run_id": run_id,
+            "stage": "stage_80_report_ready",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+    _write_json(
+        tmp_path / "artifacts" / "runs" / run_id / "metrics.json",
+        {
+            "status": "success",
+            "errors": [],
+            "validation": {"passed": True},
+            "leakage": {"passed": True},
+            "backtest": {"summary": {"days": "nan"}},
+        },
+    )
+    (tmp_path / "artifacts" / "runs" / run_id / "report.md").write_text("# report")
+    payload = collect_ops_status(project_dir=tmp_path, run_id=run_id, max_age_hours=24, require_gpu=False)
+    assert payload["backtest_summary"]["days"] is None
