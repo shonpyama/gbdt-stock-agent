@@ -216,7 +216,6 @@ def test_pipeline_fails_on_deliberate_leak(monkeypatch, tmp_path: Path) -> None:
     state = json.loads((project_dir / "state" / "last_run_state.json").read_text())
     assert state["stage"] == "stage_40_split_leakcheck_failed"
 
-
 def test_resume_archives_old_errors_in_metrics(monkeypatch, tmp_path: Path) -> None:
     project_dir = tmp_path / "qp_proj_resume_errors"
     project_dir.mkdir(parents=True, exist_ok=True)
@@ -246,3 +245,78 @@ def test_resume_archives_old_errors_in_metrics(monkeypatch, tmp_path: Path) -> N
     assert metrics["status"] == "success"
     assert metrics.get("errors") == []
     assert len(metrics.get("historical_errors") or []) >= 1
+
+
+def test_pipeline_resume_by_run_id_with_conf_mismatch_allowed(monkeypatch, tmp_path: Path) -> None:
+    project_dir = tmp_path / "qp_proj_resume_by_id"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    conf1 = _make_conf(project_dir)
+    conf1_path = project_dir / "conf1.yaml"
+    conf1_path.write_text(yaml.safe_dump(conf1, sort_keys=False))
+    _install_fakes(monkeypatch, project_dir)
+
+    run_id1 = rexp.run_pipeline(
+        project_dir=project_dir,
+        conf_path=conf1_path,
+        resume=False,
+        force_unlock=True,
+        stop_after_stage="stage_30_features_ready",
+    )
+
+    conf2 = _make_conf(project_dir)
+    conf2["run"]["log_level"] = "DEBUG"  # conf_hashを変えるがロジックには影響しない差分
+    conf2_path = project_dir / "conf2.yaml"
+    conf2_path.write_text(yaml.safe_dump(conf2, sort_keys=False))
+
+    run_id2 = rexp.run_pipeline(
+        project_dir=project_dir,
+        conf_path=conf2_path,
+        resume=True,
+        resume_run_id=run_id1,
+        allow_resume_conf_mismatch=True,
+        force_unlock=True,
+    )
+    assert run_id1 == run_id2
+    state = json.loads((project_dir / "state" / "last_run_state.json").read_text())
+    assert state["run_id"] == run_id1
+    assert state["stage"] == "stage_80_report_ready"
+
+
+def test_pipeline_stage_checkpoint_sync_writes_log(monkeypatch, tmp_path: Path) -> None:
+    project_dir = tmp_path / "qp_proj_checkpoint_sync"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    conf = _make_conf(project_dir)
+    conf_path = project_dir / "conf.yaml"
+    conf_path.write_text(yaml.safe_dump(conf, sort_keys=False))
+    _install_fakes(monkeypatch, project_dir)
+
+    drive_path = tmp_path / "drive"
+    monkeypatch.setenv("GBDT_CHECKPOINT_DRIVE_PATH", str(drive_path))
+
+    calls = []
+
+    def fake_sync_runtime_to_drive(local_root=None, drive_path=None):
+        calls.append((str(local_root), str(drive_path)))
+        return {
+            "direction": "local_to_drive",
+            "copied_files": 1,
+            "local_root": str(local_root),
+            "drive_path": str(drive_path),
+        }
+
+    import gbdt_agent.colab as colab_mod
+
+    monkeypatch.setattr(colab_mod, "sync_runtime_to_drive", fake_sync_runtime_to_drive)
+
+    run_id = rexp.run_pipeline(
+        project_dir=project_dir,
+        conf_path=conf_path,
+        resume=False,
+        force_unlock=True,
+        stop_after_stage="stage_20_validation_passed",
+    )
+    assert len(calls) >= 3  # stage_00, stage_10, stage_20
+    log_path = project_dir / "artifacts" / "runs" / run_id / "logs" / "checkpoint_sync.log"
+    assert log_path.exists()
+    text = log_path.read_text()
+    assert "stage_20_validation_passed" in text

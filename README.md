@@ -24,6 +24,8 @@ python -m gbdt_agent.cli run --conf conf/default.yaml --resume
 ## CLI
 - `python -m gbdt_agent.cli preflight --conf <path>`
 - `python -m gbdt_agent.cli run --conf <path> --resume --stop-after-stage <stage>`
+- `python -m gbdt_agent.cli run --conf <path> --resume --run-id <id> --allow-conf-mismatch-resume`
+- `python -m gbdt_agent.cli run --conf <path> --resume --checkpoint-drive-path <drive_path>`
 - `python -m gbdt_agent.cli report --run-id <id>`
 - `python -m gbdt_agent.cli transition-report --run-id <id> --target colab`
 - `python -m gbdt_agent.cli migrate pack --run-id <id> --out <zip>`
@@ -53,3 +55,15 @@ python -m gbdt_agent.cli run --conf conf/default.yaml --resume
 - APIキーは `FMP_API_KEY` を優先し、未設定時は `/content/.env_fmp`（または `FMP_API_KEY_FILE` 指定ファイル）を参照します。
 - ログはキー値をマスクします。
 - LightGBM は `models.gbdt.prefer_gpu` (既定: `true`) でGPUを自動利用し、利用不可時はCPUへ自動フォールバックします。
+
+## Colab切断時の確実再開
+1. まず復元: `python -m gbdt_agent.cli colab restore --drive-path /content/drive/MyDrive/gbdt-stock-agent`
+2. 直近runを確認: `cat state/last_run_state.json`（`run_id` と `stage` を見る）
+3. 同じrunを指定して再開:
+   - `python -m gbdt_agent.cli run --conf conf/default.yaml --resume --run-id <run_id> --allow-conf-mismatch-resume --force-unlock --checkpoint-drive-path /content/drive/MyDrive/gbdt-stock-agent`
+4. 局面終了時に明示同期:
+   - `python -m gbdt_agent.cli colab sync --drive-path /content/drive/MyDrive/gbdt-stock-agent`
+
+補足:
+- stage完了ごとに `checkpoint_sync.log` へ同期結果を記録します。
+- `state/runs/<run_id>.json` も保存されるため、`last_run_state.json` が古くても run_id 指定で再開できます。

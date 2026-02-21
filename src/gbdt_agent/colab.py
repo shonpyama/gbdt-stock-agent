@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import atexit
+import hashlib
 import importlib.util
+import os
 import shutil
 import threading
 from dataclasses import dataclass, field
@@ -21,6 +23,8 @@ SYNC_DIRS = (
     "logs",
     "reports",
 )
+CONTENT_CHECK_SUFFIXES = {".json", ".md", ".txt", ".log", ".yaml", ".yml"}
+CONTENT_CHECK_BASENAMES = {"last_run_state.json", "lock.json", "metrics.json", "report.md", "artifact_manifest.json"}
 
 
 def is_colab() -> bool:
@@ -40,10 +44,31 @@ def mount_drive(drive_path: Optional[Path] = None) -> Path:
 def _copy_if_newer(src: Path, dst: Path) -> int:
     if not src.exists() or not src.is_file():
         return 0
+
+    src_stat = src.stat()
     dst.parent.mkdir(parents=True, exist_ok=True)
-    if not dst.exists() or int(src.stat().st_mtime) > int(dst.stat().st_mtime) or src.stat().st_size != dst.stat().st_size:
+    if not dst.exists():
         shutil.copy2(src, dst)
         return 1
+
+    dst_stat = dst.stat()
+    src_mtime_ns = getattr(src_stat, "st_mtime_ns", int(src_stat.st_mtime * 1_000_000_000))
+    dst_mtime_ns = getattr(dst_stat, "st_mtime_ns", int(dst_stat.st_mtime * 1_000_000_000))
+
+    if src_stat.st_size != dst_stat.st_size:
+        shutil.copy2(src, dst)
+        return 1
+    if src_mtime_ns > dst_mtime_ns:
+        shutil.copy2(src, dst)
+        return 1
+    if src_mtime_ns < dst_mtime_ns:
+        return 0
+
+    # mtime/size が一致しても内容が変わるケースに備え、メタ情報系ファイルはハッシュで比較する
+    if src.name in CONTENT_CHECK_BASENAMES or src.suffix.lower() in CONTENT_CHECK_SUFFIXES or "state" in src.parts:
+        if _sha1_file(src) != _sha1_file(dst):
+            shutil.copy2(src, dst)
+            return 1
     return 0
 
 
@@ -89,6 +114,17 @@ def sync_runtime_to_drive(local_root: Optional[Path] = None, drive_path: Optiona
         "local_root": str(local_root),
         "drive_path": str(drive_path),
     }
+
+
+def _sha1_file(path: Path) -> str:
+    h = hashlib.sha1()
+    with path.open("rb") as f:
+        while True:
+            b = f.read(1024 * 1024)
+            if not b:
+                break
+            h.update(b)
+    return h.hexdigest()
 
 
 @dataclass
@@ -144,6 +180,7 @@ def setup_fast_colab_persistence(
     interval_seconds: int = 600,
 ) -> PeriodicSyncHandle:
     dp = mount_drive(drive_path)
+    os.environ["GBDT_CHECKPOINT_DRIVE_PATH"] = str(dp)
     restore_runtime_from_drive(drive_path=dp)
     handle = start_periodic_drive_sync(interval_seconds=int(interval_seconds), drive_path=dp)
 

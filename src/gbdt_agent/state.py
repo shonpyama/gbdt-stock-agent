@@ -93,8 +93,20 @@ def last_run_state_path(state_dir: Path) -> Path:
     return state_dir / "last_run_state.json"
 
 
+def run_state_path(state_dir: Path, run_id: str) -> Path:
+    return state_dir / "runs" / f"{run_id}.json"
+
+
 def load_last_state(state_dir: Path) -> Optional[Dict[str, Any]]:
     path = last_run_state_path(state_dir)
+    if not path.exists():
+        return None
+    loaded = json.loads(path.read_text())
+    return normalize_state(loaded)
+
+
+def load_run_state(state_dir: Path, run_id: str) -> Optional[Dict[str, Any]]:
+    path = run_state_path(state_dir, run_id)
     if not path.exists():
         return None
     loaded = json.loads(path.read_text())
@@ -106,6 +118,9 @@ def save_last_state(state_dir: Path, payload: Dict[str, Any]) -> Path:
     state = normalize_state(payload)
     state["updated_at"] = utc_now_iso()
     _atomic_write_json(path, state)
+    run_id = state.get("run_id")
+    if run_id:
+        _atomic_write_json(run_state_path(state_dir, str(run_id)), state)
     return path
 
 

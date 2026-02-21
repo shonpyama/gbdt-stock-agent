@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -30,3 +31,23 @@ def test_local_drive_sync_roundtrip(tmp_path: Path) -> None:
     assert restore_stats["copied_files"] >= 2
     assert (local_root / "data" / "cache_http" / "x.json").exists()
     assert (local_root / "reports" / "r.md").exists()
+
+
+def test_sync_copies_changed_metadata_even_if_size_and_mtime_match(tmp_path: Path) -> None:
+    local_root = tmp_path / "local"
+    drive_root = tmp_path / "drive"
+    src = local_root / "state" / "last_run_state.json"
+    dst = drive_root / "state" / "last_run_state.json"
+
+    src.parent.mkdir(parents=True, exist_ok=True)
+    src.write_text('{"stage":"a"}')
+    sync_runtime_to_drive(local_root=local_root, drive_path=drive_root)
+    assert dst.read_text() == src.read_text()
+
+    src.write_text('{"stage":"b"}')  # same byte length
+    st = dst.stat()
+    os.utime(src, ns=(st.st_atime_ns, st.st_mtime_ns))
+
+    stats = sync_runtime_to_drive(local_root=local_root, drive_path=drive_root)
+    assert stats["copied_files"] >= 1
+    assert dst.read_text() == '{"stage":"b"}'

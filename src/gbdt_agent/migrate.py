@@ -21,6 +21,7 @@ def pack_bundle(*, project_dir: Path, run_id: str, out_zip: Path) -> Dict[str, o
     include = [
         project_dir / "artifacts" / "runs" / run_id,
         project_dir / "state" / "last_run_state.json",
+        project_dir / "state" / "runs" / f"{run_id}.json",
         project_dir / "data" / "cache_http",
         project_dir / "conf" / "default.yaml",
         project_dir / "conf" / "cost_model.yaml",

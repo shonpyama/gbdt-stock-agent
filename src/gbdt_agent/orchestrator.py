@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,6 +28,7 @@ from .state import (
     append_state_error,
     last_success_stage,
     load_last_state,
+    load_run_state,
     normalize_state,
     release_lock,
     save_last_state,
@@ -171,6 +173,8 @@ def run_pipeline(
     project_dir: Path,
     conf_path: Path,
     resume: bool,
+    resume_run_id: Optional[str] = None,
+    allow_resume_conf_mismatch: bool = False,
     force_stage: Optional[str] = None,
     force_unlock: bool = False,
     stop_after_stage: Optional[str] = None,
@@ -185,8 +189,35 @@ def run_pipeline(
     conf_hash_val = config_hash(cfg)
     code_hash = compute_code_hash(paths.src_dir)
 
-    last_state = normalize_state(load_last_state(paths.state_dir) or {}) if resume else None
-    reuse_run = bool(last_state and last_state.get("run_id") and last_state.get("conf_hash") == conf_hash_val)
+    last_state: Optional[Dict[str, Any]] = None
+    if resume:
+        if resume_run_id:
+            loaded = load_run_state(paths.state_dir, str(resume_run_id))
+            if not loaded:
+                raise RuntimeError(f"Requested resume run_id not found in state/runs: {resume_run_id}")
+            last_state = normalize_state(loaded)
+        else:
+            loaded = load_last_state(paths.state_dir)
+            last_state = normalize_state(loaded) if loaded else None
+
+    reuse_run = False
+    if last_state and last_state.get("run_id"):
+        conf_matches = (last_state.get("conf_hash") == conf_hash_val)
+        if conf_matches:
+            reuse_run = True
+        elif resume_run_id and allow_resume_conf_mismatch:
+            reuse_run = True
+            logger.warning(
+                "resume_conf_hash_mismatch_allowed run_id=%s state_conf=%s current_conf=%s",
+                last_state.get("run_id"),
+                last_state.get("conf_hash"),
+                conf_hash_val,
+            )
+        elif resume_run_id:
+            raise RuntimeError(
+                "Resume target conf_hash mismatch. Re-run with --allow-conf-mismatch-resume to force continuation."
+            )
+
     run_id = str(last_state.get("run_id")) if reuse_run else make_run_id(conf_hash_val, code_hash)
 
     run_dir = paths.run_dir(run_id)
@@ -253,11 +284,44 @@ def run_pipeline(
 
     horizon = int((cfg.get("labels") or {}).get("horizon_trading_days", 20))
     target_col = str((cfg.get("labels") or {}).get("target_col", f"future_return_{horizon}d"))
+    run_cfg = cfg.get("run") or {}
+    checkpoint_drive_raw = str(run_cfg.get("checkpoint_drive_path") or os.environ.get("GBDT_CHECKPOINT_DRIVE_PATH", "")).strip()
+    checkpoint_drive_path = Path(checkpoint_drive_raw) if checkpoint_drive_raw else None
+    if checkpoint_drive_path:
+        metrics["checkpoint_drive_path"] = str(checkpoint_drive_path)
+
+    def _checkpoint_sync(stage: str) -> None:
+        if checkpoint_drive_path is None:
+            return
+        log_path = run_dir / "logs" / "checkpoint_sync.log"
+        try:
+            from .colab import sync_runtime_to_drive
+
+            stats = sync_runtime_to_drive(local_root=project_dir, drive_path=checkpoint_drive_path)
+            rec = {
+                "ts": _utc_iso(),
+                "stage": stage,
+                "drive_path": str(checkpoint_drive_path),
+                "copied_files": int(stats.get("copied_files", 0)),
+            }
+            with log_path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=True) + "\n")
+        except Exception as exc:  # pragma: no cover
+            rec = {
+                "ts": _utc_iso(),
+                "stage": stage,
+                "drive_path": str(checkpoint_drive_path),
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+            logger.warning("checkpoint_sync_failed stage=%s err=%s", stage, rec["error"])
+            with log_path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=True) + "\n")
 
     def _save_state(stage: str) -> None:
         state_payload["stage"] = stage
         save_last_state(paths.state_dir, state_payload)
         _write_artifact_manifest(paths, run_dir, run_id, stage)
+        _checkpoint_sync(stage)
 
     def _write_metrics() -> None:
         _write_json(metrics_path, metrics)
@@ -661,6 +725,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p.add_argument("--project-dir", required=True)
     p.add_argument("--conf", required=True)
     p.add_argument("--resume", action="store_true")
+    p.add_argument("--run-id", default=None)
+    p.add_argument("--allow-conf-mismatch-resume", action="store_true")
     p.add_argument("--force-stage", default=None)
     p.add_argument("--force-unlock", action="store_true")
     p.add_argument("--stop-after-stage", default=None)
@@ -670,6 +736,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         project_dir=Path(args.project_dir),
         conf_path=Path(args.conf),
         resume=bool(args.resume),
+        resume_run_id=args.run_id,
+        allow_resume_conf_mismatch=bool(args.allow_conf_mismatch_resume),
         force_stage=args.force_stage,
         force_unlock=bool(args.force_unlock),
         stop_after_stage=args.stop_after_stage,

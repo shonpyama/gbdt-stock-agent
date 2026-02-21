@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -78,10 +79,14 @@ def cmd_preflight(args: argparse.Namespace) -> int:
 
 def cmd_run(args: argparse.Namespace) -> int:
     project_dir = _project_dir_from_cwd()
+    if args.checkpoint_drive_path:
+        os.environ["GBDT_CHECKPOINT_DRIVE_PATH"] = str(args.checkpoint_drive_path)
     run_id = run_pipeline(
         project_dir=project_dir,
         conf_path=Path(args.conf),
         resume=bool(args.resume),
+        resume_run_id=args.run_id,
+        allow_resume_conf_mismatch=bool(args.allow_conf_mismatch_resume),
         force_stage=args.force_stage,
         force_unlock=bool(args.force_unlock),
         stop_after_stage=args.stop_after_stage,
@@ -217,6 +222,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_run = sub.add_parser("run")
     p_run.add_argument("--conf", required=True)
     p_run.add_argument("--resume", action="store_true")
+    p_run.add_argument("--run-id", default=None)
+    p_run.add_argument("--allow-conf-mismatch-resume", action="store_true")
+    p_run.add_argument("--checkpoint-drive-path", default=None)
     p_run.add_argument("--force-stage", default=None)
     p_run.add_argument("--force-unlock", action="store_true")
     p_run.add_argument("--stop-after-stage", default=None)

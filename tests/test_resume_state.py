@@ -6,7 +6,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from gbdt_agent.state import append_state_error, last_success_stage, load_last_state, save_last_state
+from gbdt_agent.state import (
+    append_state_error,
+    last_success_stage,
+    load_last_state,
+    load_run_state,
+    save_last_state,
+)
 
 
 def test_last_success_stage_for_failed_stage() -> None:
@@ -28,6 +34,9 @@ def test_state_save_load_normalizes_defaults(tmp_path: Path) -> None:
     assert loaded["feature_store_id"] is None
     assert isinstance(loaded["model_ckpt_paths"], dict)
     assert loaded["updated_at"] is not None
+    run_loaded = load_run_state(tmp_path, "r1")
+    assert run_loaded is not None
+    assert run_loaded["run_id"] == "r1"
 
 
 def test_append_state_error_keeps_history() -> None:
