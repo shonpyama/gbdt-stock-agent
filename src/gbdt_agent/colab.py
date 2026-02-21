@@ -25,6 +25,7 @@ SYNC_DIRS = (
 )
 CONTENT_CHECK_SUFFIXES = {".json", ".md", ".txt", ".log", ".yaml", ".yml"}
 CONTENT_CHECK_BASENAMES = {"last_run_state.json", "lock.json", "metrics.json", "report.md", "artifact_manifest.json"}
+CONTENT_CHECK_SKIP_PARTS = {"cache_http"}
 
 
 def is_colab() -> bool:
@@ -64,8 +65,14 @@ def _copy_if_newer(src: Path, dst: Path) -> int:
     if src_mtime_ns < dst_mtime_ns:
         return 0
 
-    # mtime/size が一致しても内容が変わるケースに備え、メタ情報系ファイルはハッシュで比較する
-    if src.name in CONTENT_CHECK_BASENAMES or src.suffix.lower() in CONTENT_CHECK_SUFFIXES or "state" in src.parts:
+    # mtime/size が一致しても内容が変わるケースに備え、メタ情報系ファイルはハッシュで比較する。
+    # cache_http はファイル数が多く、ハッシュ比較コストが高いためメタ情報チェック対象から除外する。
+    should_hash_check = (
+        src.name in CONTENT_CHECK_BASENAMES
+        or src.suffix.lower() in CONTENT_CHECK_SUFFIXES
+        or "state" in src.parts
+    )
+    if should_hash_check and CONTENT_CHECK_SKIP_PARTS.isdisjoint(set(src.parts)):
         if _sha1_file(src) != _sha1_file(dst):
             shutil.copy2(src, dst)
             return 1
