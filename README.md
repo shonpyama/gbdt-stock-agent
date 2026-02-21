@@ -45,6 +45,10 @@ export FMP_API_KEY="your_api_key"
 # GBDT専用導線（GNNを使わない）
 ./run_gbdt_only.sh AAPL,MSFT,NVDA quick
 ./run_gbdt_only.sh AAPL,MSFT,NVDA,AMZN,META improve
+# 直近ゲート結果に応じて quick / improve を自動選択
+./run_gbdt_autopilot.sh AAPL,MSFT,NVDA,AMZN,META auto
+# 挙動確認のみ（実行しない）
+./run_gbdt_autopilot.sh AAPL,MSFT,NVDA,AMZN,META auto --dry-run
 
 # 実行（結果は ./outputs/ に保存）
 ./run_all_local.sh AAPL,MSFT,NVDA       # パイプライン+ランカー+比較
