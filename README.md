@@ -59,6 +59,8 @@ python display_report.py
 python evaluate_review_gate.py
 # 最新実行マニフェスト(成果物・ログ・git状態)を確認
 cat outputs/reports/latest_run_manifest.json
+# 最新KPIを1コマンドで表示
+python print_latest_kpi.py
 # ゲートFAIL時にパラメータを自動で切り替えて再試行
 ./auto_improve_loop.sh AAPL,MSFT,NVDA,AMZN,META
 # 自動改善の試行上限やゲート閾値を上書き
