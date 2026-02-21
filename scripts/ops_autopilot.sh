@@ -12,7 +12,8 @@ OPS_POLICY="${OPS_POLICY:-conf/ops_policy.yaml}"
 export PYTHONPATH="${ROOT_DIR}/src:${PYTHONPATH:-}"
 
 python -m gbdt_agent.cli preflight --conf "${CONF_PATH}"
-RUN_ID="$(python -m gbdt_agent.cli run --conf "${CONF_PATH}" --resume | python -c 'import json,sys; print(json.load(sys.stdin)["run_id"])')"
+python -m gbdt_agent.cli run --conf "${CONF_PATH}" --resume
+RUN_ID="$(python -c 'import json; print(json.load(open("state/last_run_state.json"))["run_id"])')"
 python -m gbdt_agent.cli report --run-id "${RUN_ID}" --conf "${CONF_PATH}"
 python -m gbdt_agent.cli transition-report --run-id "${RUN_ID}" --target colab
 SNAPSHOT_RC=0

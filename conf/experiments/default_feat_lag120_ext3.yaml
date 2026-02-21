@@ -8,7 +8,7 @@ run:
 
 universe:
   name: "sp500_pit"
-  provider: "sp500_point_in_time"  # or custom_list
+  provider: "sp500_point_in_time"
   fallback_small50:
     enabled: true
     symbols: []
@@ -69,7 +69,7 @@ validation:
     div_adj_extra_tolerance: 0.03
 
 features:
-  lookbacks: [1, 3, 5, 10, 20, 60, 120]
+  lookbacks: [1, 2, 3, 5, 10, 20, 60, 120]
   event_safe_shift_days: 1
 
 labels:

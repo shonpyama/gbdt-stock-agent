@@ -1,0 +1,134 @@
+{
+  "base_conf": "/content/gbdt-stock-agent/conf/smoke_local.yaml",
+  "ranked": [
+    {
+      "name": "lb_1_5_20_60_120",
+      "conf_path": "/content/gbdt-stock-agent/conf/experiments/smoke_feature_04_lb_1_5_20_60_120.yaml",
+      "lookbacks": [
+        1,
+        5,
+        20,
+        60,
+        120
+      ],
+      "event_shift": 1,
+      "ok": true,
+      "run_id": "20260221_164705Z_8a0d7549_9192a824",
+      "status": "success",
+      "rank_ic_test_mean": 0.40963518932503806,
+      "ic_test_mean": 0.424796684770273,
+      "sharpe": 21.49447240960818,
+      "total_return": 0.15439685527565072,
+      "max_drawdown": 0.0,
+      "score": 45.26256781128071
+    },
+    {
+      "name": "lb_1_5_20_60_120_shift2",
+      "conf_path": "/content/gbdt-stock-agent/conf/experiments/smoke_feature_06_lb_1_5_20_60_120_shift2.yaml",
+      "lookbacks": [
+        1,
+        5,
+        20,
+        60,
+        120
+      ],
+      "event_shift": 2,
+      "ok": true,
+      "run_id": "20260221_164716Z_1722c09f_9192a824",
+      "status": "success",
+      "rank_ic_test_mean": 0.40963518932503806,
+      "ic_test_mean": 0.424796684770273,
+      "sharpe": 21.49447240960818,
+      "total_return": 0.15439685527565072,
+      "max_drawdown": 0.0,
+      "score": 45.26256781128071
+    },
+    {
+      "name": "lb_1_5_10_20_40_80",
+      "conf_path": "/content/gbdt-stock-agent/conf/experiments/smoke_feature_03_lb_1_5_10_20_40_80.yaml",
+      "lookbacks": [
+        1,
+        5,
+        10,
+        20,
+        40,
+        80
+      ],
+      "event_shift": 1,
+      "ok": true,
+      "run_id": "20260221_164702Z_6063f521_9192a824",
+      "status": "success",
+      "rank_ic_test_mean": 0.03489691446099563,
+      "ic_test_mean": -0.09910297918002486,
+      "sharpe": -0.3838638875813853,
+      "total_return": -0.004535482722942796,
+      "max_drawdown": -0.054775269438995244,
+      "score": 3.4129141331005632
+    },
+    {
+      "name": "lb_1_3_5_10_20_60",
+      "conf_path": "/content/gbdt-stock-agent/conf/experiments/smoke_feature_01_lb_1_3_5_10_20_60.yaml",
+      "lookbacks": [
+        1,
+        3,
+        5,
+        10,
+        20,
+        60
+      ],
+      "event_shift": 1,
+      "ok": true,
+      "run_id": "20260221_164650Z_199db567_9192a824",
+      "status": "success",
+      "rank_ic_test_mean": -0.040566562386283325,
+      "ic_test_mean": -0.23861388857425572,
+      "sharpe": 0.6313702820761034,
+      "total_return": 0.004290719167678869,
+      "max_drawdown": -0.04966742341275088,
+      "score": -3.9303778914939445
+    },
+    {
+      "name": "lb_1_5_20_60_shift2",
+      "conf_path": "/content/gbdt-stock-agent/conf/experiments/smoke_feature_05_lb_1_5_20_60_shift2.yaml",
+      "lookbacks": [
+        1,
+        5,
+        20,
+        60
+      ],
+      "event_shift": 2,
+      "ok": true,
+      "run_id": "20260221_164713Z_e6805f20_9192a824",
+      "status": "success",
+      "rank_ic_test_mean": -0.09255800040165318,
+      "ic_test_mean": -0.2785040950127019,
+      "sharpe": -11.17809202180446,
+      "total_return": -0.06902269333569078,
+      "max_drawdown": -0.06446341284705648,
+      "score": -11.491487467219546
+    },
+    {
+      "name": "lb_1_2_5_10_20_40_60",
+      "conf_path": "/content/gbdt-stock-agent/conf/experiments/smoke_feature_02_lb_1_2_5_10_20_40_60.yaml",
+      "lookbacks": [
+        1,
+        2,
+        5,
+        10,
+        20,
+        40,
+        60
+      ],
+      "event_shift": 1,
+      "ok": true,
+      "run_id": "20260221_164659Z_2bbcc143_9192a824",
+      "status": "success",
+      "rank_ic_test_mean": -0.2062474059945762,
+      "ic_test_mean": -0.25588000298319064,
+      "sharpe": -9.056143488681519,
+      "total_return": -0.06786154357204643,
+      "max_drawdown": -0.05838585426128684,
+      "score": -22.436037158737495
+    }
+  ]
+}

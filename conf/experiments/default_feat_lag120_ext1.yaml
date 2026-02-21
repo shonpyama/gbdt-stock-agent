@@ -1,0 +1,104 @@
+project:
+  project_dir: ''
+run:
+  seed: 42
+  log_level: INFO
+  timezone_assumption: US/Eastern; events_effective=next_trading_day; fundamentals_available_lag_trading_days=60
+universe:
+  name: sp500_pit
+  provider: sp500_point_in_time
+  fallback_small50:
+    enabled: true
+    symbols: []
+data:
+  start_date: '2020-01-01'
+  end_date: ''
+  adjusted_flag: false
+  endpoints_version:
+  - sp500_constituent
+  - historical_sp500_constituent
+  - prices_eod
+  - dividends
+  - splits
+  - earnings
+  - earnings_calendar
+  - earnings_surprises
+  - income_statement
+  - balance_sheet
+  - cash_flow
+  include_news: false
+fmp:
+  base_url: https://financialmodelingprep.com/stable
+  timeout: 30
+  endpoints:
+    sp500_constituent: sp500-constituent
+    historical_sp500_constituent: historical-sp500-constituent
+    prices_eod: historical-price-eod/full
+    dividends: dividends
+    splits: splits
+    earnings: earnings
+    earnings_calendar: earnings-calendar
+    earnings_surprises: earnings-surprises
+    income_statement: income-statement
+    balance_sheet: balance-sheet-statement
+    cash_flow: cash-flow-statement
+  rate_limit:
+    max_calls_per_minute: 300
+  retry:
+    max_attempts: 6
+    backoff_base_seconds: 1.0
+validation:
+  thresholds:
+    missing_ratio_max: 0.05
+    anomaly_row_ratio_max: 0.02
+    duplicates_ratio_max: 0.0
+    min_obs_per_symbol: 252
+    min_symbols_after_filter: 20
+    adjclose_missing_ratio_max: 0.02
+    price_jump_threshold: 0.2
+    volume_zero_streak_len: 5
+    volume_zero_streak_ratio_max: 0.02
+    split_adjustment_violation_ratio_max: 0.3
+    dividend_adjustment_violation_ratio_max: 0.3
+    split_adj_multiplier_max: 1.2
+    div_adj_extra_tolerance: 0.03
+features:
+  lookbacks:
+  - 1
+  - 3
+  - 5
+  - 10
+  - 20
+  - 60
+  - 120
+  event_safe_shift_days: 1
+labels:
+  horizon_trading_days: 20
+split:
+  walkforward:
+    train: 504
+    val: 126
+    test: 126
+    step: 63
+  purge: 20
+  embargo: 5
+  leakage:
+    corr_threshold: 0.995
+models:
+  gbdt:
+    enabled: true
+    framework: lightgbm
+    prefer_gpu: true
+    params: {}
+backtest:
+  long_short: false
+  topn: 50
+  max_names: 50
+  single_name_cap: 0.05
+  rebalance: daily
+  notional: 1000000.0
+cost_model: conf/cost_model.yaml
+drive:
+  enabled: true
+  drive_path: /content/drive/MyDrive/gbdt-stock-agent
+  sync_interval_seconds: 600
