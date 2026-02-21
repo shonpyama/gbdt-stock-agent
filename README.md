@@ -1,0 +1,42 @@
+# gbdt-stock-agent
+
+GBDTベースの株式予測エージェントです。ローカル実行を起点に、Google Colab(GPU)へスムーズに移行できるように設計しています。
+
+## 主要要件
+- タスク: S&P500 PIT を対象とした 20営業日先リターン予測
+- モデル: LightGBM 主体 (CPU/GPUフォールバック)
+- ステージ: `stage_00` 〜 `stage_80` の段階実行・再開
+- 保存: GitHub(軽量) + Google Drive(重量)
+- 移行: `transition-report` の承認前は Colab 実行不可
+
+## クイックスタート
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -e .
+
+export FMP_API_KEY="..."
+python -m gbdt_agent.cli preflight --conf conf/default.yaml
+python -m gbdt_agent.cli run --conf conf/default.yaml --resume
+```
+
+## CLI
+- `python -m gbdt_agent.cli preflight --conf <path>`
+- `python -m gbdt_agent.cli run --conf <path> --resume --stop-after-stage <stage>`
+- `python -m gbdt_agent.cli report --run-id <id>`
+- `python -m gbdt_agent.cli transition-report --run-id <id> --target colab`
+- `python -m gbdt_agent.cli migrate pack --run-id <id> --out <zip>`
+- `python -m gbdt_agent.cli migrate restore --archive <zip>`
+- `python -m gbdt_agent.cli colab restore --drive-path <path>`
+- `python -m gbdt_agent.cli colab sync --drive-path <path>`
+
+## ディレクトリ
+- `src/gbdt_agent`: 実装本体
+- `conf/`: 設定
+- `artifacts/runs/<run_id>/`: 実行成果物
+- `state/last_run_state.json`: 再開状態
+- `reports/`: 差分/レビュー/移行前報告
+
+## 注意
+- APIキーは `FMP_API_KEY` 環境変数のみを利用し、平文保存しません。
+- ログはキー値をマスクします。

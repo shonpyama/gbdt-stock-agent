@@ -1,0 +1,5 @@
+commission_bps: 1.0
+slippage:
+  base_bps: 1.0
+  k_adv: 10.0
+  k_vol: 1.0

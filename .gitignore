@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.venv/
+.pytest_cache/
+
+# OS
+.DS_Store
+
+# Build
+build/
+dist/
+*.egg-info/
+
+# Data / artifacts (heavy)
+data/
+artifacts/
+state/
+logs/
+
+# Notebook checkpoints
+.ipynb_checkpoints/
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Runtime
+*.log
