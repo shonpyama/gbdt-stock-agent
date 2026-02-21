@@ -65,6 +65,8 @@ python evaluate_review_gate.py
 cat outputs/reports/latest_run_manifest.json
 # 最新KPIを1コマンドで表示
 python print_latest_kpi.py
+# 直近ランのレビュー要否シグナルを表示
+python analyze_recent_runs.py
 # ゲートFAIL時にパラメータを自動で切り替えて再試行
 ./auto_improve_loop.sh AAPL,MSFT,NVDA,AMZN,META
 # 自動改善の試行上限やゲート閾値を上書き
