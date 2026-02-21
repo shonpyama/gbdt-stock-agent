@@ -32,6 +32,7 @@ python -m gbdt_agent.cli run --conf conf/default.yaml --resume
 - `python -m gbdt_agent.cli colab sync --drive-path <path>`
 - `python -m gbdt_agent.cli ops-status --max-age-hours 72 --require-gpu`
 - `python -m gbdt_agent.cli ops-snapshot --max-age-hours 72 --require-gpu`
+- `python -m gbdt_agent.cli ops-gate --policy conf/ops_policy.yaml`
 
 ## ディレクトリ
 - `src/gbdt_agent`: 実装本体
@@ -44,6 +45,8 @@ python -m gbdt_agent.cli run --conf conf/default.yaml --resume
 - 健全性チェック: `python -m gbdt_agent.cli ops-status --max-age-hours 72 --require-gpu`
 - スナップショット保存: `python -m gbdt_agent.cli ops-snapshot --max-age-hours 72 --require-gpu`
 - 一括運用（preflight→run→report→snapshot→sync）: `scripts/ops_autopilot.sh`
+- 運用ゲート（品質/鮮度の合否判定）: `python -m gbdt_agent.cli ops-gate --policy conf/ops_policy.yaml`
+- 閾値は `conf/ops_policy.yaml` で調整できます。ゲートNG時は `reports/ops_incident_*.md` と `logs/ops/` に記録されます。
 - `colab sync` は `reports/` を含めて同期するため、差分・レビュー・運用記録もDriveへ保存されます。
 
 ## 注意

@@ -8,7 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from gbdt_agent.operations import collect_ops_status, write_ops_snapshot
+from gbdt_agent.operations import collect_ops_status, evaluate_ops_gate, write_ops_incident, write_ops_snapshot
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -35,6 +35,9 @@ def test_collect_ops_status_success_and_snapshot(tmp_path: Path) -> None:
             "errors": [],
             "historical_errors": [],
             "training_info": {"gbdt": {"accelerator": "gpu"}},
+            "validation": {"passed": True},
+            "leakage": {"passed": True},
+            "backtest": {"summary": {"sharpe": 1.2, "max_drawdown": -0.12, "total_return": 0.18, "avg_cost": 0.01}},
         },
     )
     (tmp_path / "artifacts" / "runs" / run_id / "report.md").write_text("# report")
@@ -48,6 +51,16 @@ def test_collect_ops_status_success_and_snapshot(tmp_path: Path) -> None:
     out = write_ops_snapshot(project_dir=tmp_path, payload=payload)
     assert out.exists()
     assert (tmp_path / "logs" / "ops" / out.name).exists()
+
+    gate = evaluate_ops_gate(
+        payload,
+        {
+            "thresholds": {"min_sharpe": 0.5, "min_total_return": 0.0, "min_max_drawdown": -0.3, "max_avg_cost": 0.03},
+            "require_validation_passed": True,
+            "require_leakage_passed": True,
+        },
+    )
+    assert gate["ok"] is True
 
 
 def test_collect_ops_status_detects_stale_and_failures(tmp_path: Path) -> None:
@@ -68,6 +81,9 @@ def test_collect_ops_status_detects_stale_and_failures(tmp_path: Path) -> None:
             "status": "error",
             "errors": [{"type": "RuntimeError"}],
             "training_info": {"gbdt": {"accelerator": "cpu"}},
+            "validation": {"passed": False},
+            "leakage": {"passed": False},
+            "backtest": {"summary": {"sharpe": -0.1, "max_drawdown": -0.8, "total_return": -0.5, "avg_cost": 0.2}},
         },
     )
 
@@ -77,3 +93,17 @@ def test_collect_ops_status_detects_stale_and_failures(tmp_path: Path) -> None:
     assert payload["checks"]["stage_80_ready"] is False
     assert payload["checks"]["status_success"] is False
     assert payload["checks"]["active_errors_empty"] is False
+
+    gate = evaluate_ops_gate(
+        payload,
+        {
+            "thresholds": {"min_sharpe": 0.5, "min_total_return": 0.0, "min_max_drawdown": -0.3, "max_avg_cost": 0.03},
+            "require_validation_passed": True,
+            "require_leakage_passed": True,
+        },
+    )
+    assert gate["ok"] is False
+    assert any("threshold_failed:min_sharpe" in v for v in gate["violations"])
+    incident = write_ops_incident(project_dir=tmp_path, payload=gate)
+    assert incident.exists()
+    assert (tmp_path / "logs" / "ops" / incident.name).exists()

@@ -12,7 +12,7 @@ from .colab import restore_runtime_from_drive, sync_runtime_to_drive
 from .config import load_config
 from .fmp_client import FMPClient, cache_key, resolve_fmp_api_key
 from .migrate import pack_bundle, restore_bundle
-from .operations import collect_ops_status, write_ops_snapshot
+from .operations import collect_ops_status, evaluate_ops_gate, load_ops_policy, write_ops_incident, write_ops_snapshot
 from .orchestrator import run_pipeline
 from .paths import ProjectPaths
 from .reporting import render_report_md, write_report
@@ -183,6 +183,27 @@ def cmd_ops_snapshot(args: argparse.Namespace) -> int:
     return 0 if bool(payload.get("ok")) else 1
 
 
+def cmd_ops_gate(args: argparse.Namespace) -> int:
+    project_dir = _project_dir_from_cwd()
+    policy_path = Path(args.policy) if args.policy else (project_dir / "conf" / "ops_policy.yaml")
+    if not policy_path.is_absolute():
+        policy_path = project_dir / policy_path
+    policy = load_ops_policy(policy_path)
+
+    payload = collect_ops_status(
+        project_dir=project_dir,
+        run_id=args.run_id,
+        max_age_hours=float(policy.get("max_age_hours", 72.0)),
+        require_gpu=bool(policy.get("require_gpu", False)),
+    )
+    gate = evaluate_ops_gate(payload, policy)
+    if not bool(gate.get("ok")) and not bool(args.no_incident):
+        incident = write_ops_incident(project_dir=project_dir, payload=gate)
+        gate["incident_path"] = str(incident)
+    print(json.dumps(gate, indent=2, ensure_ascii=True))
+    return 0 if bool(gate.get("ok")) else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="gbdt_agent.cli")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -241,6 +262,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_ops_snap.add_argument("--max-age-hours", type=float, default=72.0)
     p_ops_snap.add_argument("--require-gpu", action="store_true")
     p_ops_snap.set_defaults(func=cmd_ops_snapshot)
+
+    p_ops_gate = sub.add_parser("ops-gate")
+    p_ops_gate.add_argument("--run-id", default=None)
+    p_ops_gate.add_argument("--policy", default="conf/ops_policy.yaml")
+    p_ops_gate.add_argument("--no-incident", action="store_true")
+    p_ops_gate.set_defaults(func=cmd_ops_gate)
 
     return p
 

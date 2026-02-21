@@ -32,3 +32,5 @@ logs/
 
 # Generated reports
 reports/pre_colab_transition_*.md
+reports/ops_snapshot_*.md
+reports/ops_incident_*.md

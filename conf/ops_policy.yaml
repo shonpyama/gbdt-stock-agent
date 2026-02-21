@@ -1,0 +1,10 @@
+max_age_hours: 72
+require_gpu: true
+require_validation_passed: true
+require_leakage_passed: true
+
+thresholds:
+  min_sharpe: 0.50
+  min_total_return: -0.25
+  min_max_drawdown: -0.45
+  max_avg_cost: 0.03
