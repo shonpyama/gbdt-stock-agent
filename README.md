@@ -61,6 +61,8 @@ python evaluate_review_gate.py
 cat outputs/reports/latest_run_manifest.json
 # ゲートFAIL時にパラメータを自動で切り替えて再試行
 ./auto_improve_loop.sh AAPL,MSFT,NVDA,AMZN,META
+# 自動改善の試行上限やゲート閾値を上書き
+MAX_ATTEMPTS=4 GATE_MIN_AVG_AUC=0.55 ./auto_improve_loop.sh AAPL,MSFT,NVDA,AMZN,META
 # 現在状態(差分・ログ・最新成果物)をDrive上にチェックポイント保存
 ./save_workspace_checkpoint.sh manual
 # dirtyワークツリーでもコミット1件を安全にpush

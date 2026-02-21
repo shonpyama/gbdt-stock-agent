@@ -242,10 +242,20 @@ fi
 
 echo "[5/5] Evaluating review gate artifact"
 STRICT_GATE="${STRICT_REVIEW_GATE:-0}"
+GATE_MIN_AVG_AUC="${GATE_MIN_AVG_AUC:-0.50}"
+GATE_MIN_BEST_SHARPE="${GATE_MIN_BEST_SHARPE:-0.30}"
+GATE_MIN_OVERLAP="${GATE_MIN_OVERLAP:-3}"
+GATE_MIN_POSITION_MATCH="${GATE_MIN_POSITION_MATCH:-2}"
+GATE_MIN_RANK_CORR="${GATE_MIN_RANK_CORR:-0.20}"
 GATE_CMD=(python evaluate_review_gate.py
   --detailed-report outputs/reports/latest_detailed_report.json
   --comparison-report outputs/reports/latest_comparison.json
   --out outputs/reports/latest_gate.json
+  --min-avg-auc "$GATE_MIN_AVG_AUC"
+  --min-best-sharpe "$GATE_MIN_BEST_SHARPE"
+  --min-overlap "$GATE_MIN_OVERLAP"
+  --min-position-match "$GATE_MIN_POSITION_MATCH"
+  --min-rank-corr "$GATE_MIN_RANK_CORR"
 )
 if [[ "$STRICT_GATE" == "1" ]]; then
   echo "Strict review gate enabled."

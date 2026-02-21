@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
 SYMBOLS="${1:-AAPL,MSFT,NVDA,AMZN,META}"
+MAX_ATTEMPTS="${MAX_ATTEMPTS:-6}"
 mkdir -p outputs/logs outputs/reports
 LOOP_LOG="outputs/logs/auto_improve_$(date -u +%Y%m%d_%H%M%S).log"
 ATTEMPTS_TS="$(date -u +%Y%m%d_%H%M%S)"
@@ -48,6 +49,13 @@ if [[ -z "${FMP_API_KEY:-}" ]]; then
   exit 1
 fi
 
+export GATE_MIN_AVG_AUC="${GATE_MIN_AVG_AUC:-0.50}"
+export GATE_MIN_BEST_SHARPE="${GATE_MIN_BEST_SHARPE:-0.30}"
+export GATE_MIN_OVERLAP="${GATE_MIN_OVERLAP:-3}"
+export GATE_MIN_POSITION_MATCH="${GATE_MIN_POSITION_MATCH:-2}"
+export GATE_MIN_RANK_CORR="${GATE_MIN_RANK_CORR:-0.20}"
+
+attempt_count=0
 last_failure_category="unknown"
 
 detect_failure_category() {
@@ -87,6 +95,12 @@ run_case() {
   local min_trades="$5"
   local wf_folds="$6"
 
+  if [[ "$attempt_count" -ge "$MAX_ATTEMPTS" ]]; then
+    echo "Attempt budget reached (${attempt_count}/${MAX_ATTEMPTS})."
+    return 2
+  fi
+  attempt_count=$((attempt_count + 1))
+
   export PIPE_FORWARD_DAYS="$forward_days"
   export PIPE_RULE_THRESHOLDS="$thresholds"
   export PIPE_EMBARGO_DAYS="$embargo"
@@ -102,6 +116,9 @@ run_case() {
   echo "PIPE_EMBARGO_DAYS=$PIPE_EMBARGO_DAYS"
   echo "PIPE_MIN_RULE_TRADES=$PIPE_MIN_RULE_TRADES"
   echo "PIPE_WF_FOLDS=$PIPE_WF_FOLDS"
+  echo "GATE_MIN_AVG_AUC=$GATE_MIN_AVG_AUC"
+  echo "GATE_MIN_BEST_SHARPE=$GATE_MIN_BEST_SHARPE"
+  echo "Attempt budget: ${attempt_count}/${MAX_ATTEMPTS}"
 
   local rc=0
   if STRICT_REVIEW_GATE=1 ./run_all_local.sh "$SYMBOLS"; then
@@ -143,6 +160,12 @@ data["attempts"].append(
             "PIPE_MIN_RULE_TRADES": "$min_trades",
             "PIPE_WF_FOLDS": "$wf_folds",
             "PIPE_USE_GPU": "1",
+            "GATE_MIN_AVG_AUC": "$GATE_MIN_AVG_AUC",
+            "GATE_MIN_BEST_SHARPE": "$GATE_MIN_BEST_SHARPE",
+            "GATE_MIN_OVERLAP": "$GATE_MIN_OVERLAP",
+            "GATE_MIN_POSITION_MATCH": "$GATE_MIN_POSITION_MATCH",
+            "GATE_MIN_RANK_CORR": "$GATE_MIN_RANK_CORR",
+            "MAX_ATTEMPTS": "$MAX_ATTEMPTS",
         },
         "run_all_exit_code": $rc,
         "gate_status": gate.get("status"),
@@ -199,21 +222,25 @@ case "$last_failure_category" in
     if run_case "auc-short-horizon" "10" "0.50,0.55,0.60" "3" "200" "3"; then exit 0; fi
     if run_case "auc-more-folds" "20" "0.45,0.50,0.55" "5" "200" "4"; then exit 0; fi
     if run_case "auc-long-horizon" "30" "0.50,0.55,0.60,0.65" "7" "200" "3"; then exit 0; fi
+    if run_case "auc-medium-horizon" "15" "0.45,0.50,0.55,0.60" "5" "180" "4"; then exit 0; fi
     ;;
   rule)
     if run_case "rule-looser-thresholds" "20" "0.45,0.50,0.55,0.60" "3" "200" "3"; then exit 0; fi
     if run_case "rule-lower-trades" "20" "0.50,0.55,0.60" "5" "150" "3"; then exit 0; fi
     if run_case "rule-wide-thresholds" "20" "0.40,0.45,0.50,0.55,0.60" "3" "150" "3"; then exit 0; fi
+    if run_case "rule-higher-folds" "20" "0.45,0.50,0.55,0.60" "3" "150" "4"; then exit 0; fi
     ;;
   alignment)
     if run_case "align-stable" "20" "0.50,0.55,0.60" "5" "300" "3"; then exit 0; fi
     if run_case "align-looser-thresholds" "20" "0.45,0.50,0.55" "3" "200" "3"; then exit 0; fi
+    if run_case "align-compact-thresholds" "20" "0.50,0.55" "5" "200" "3"; then exit 0; fi
     ;;
   *)
     if run_case "fallback-looser-thresholds" "20" "0.45,0.50,0.55,0.60" "3" "200" "3"; then exit 0; fi
     if run_case "fallback-short-horizon" "10" "0.50,0.55,0.60" "3" "200" "3"; then exit 0; fi
     if run_case "fallback-long-horizon" "30" "0.50,0.55,0.60,0.65" "7" "200" "3"; then exit 0; fi
     if run_case "fallback-more-folds" "20" "0.45,0.50,0.55" "5" "200" "4"; then exit 0; fi
+    if run_case "fallback-medium-horizon" "15" "0.45,0.50,0.55,0.60" "5" "180" "4"; then exit 0; fi
     ;;
 esac
 
