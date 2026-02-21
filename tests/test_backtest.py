@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -74,3 +75,20 @@ def test_backtest_weekly_has_lower_or_equal_turnover_than_daily() -> None:
         slippage_k_vol=0.0,
     )
     assert float(weekly.daily["turnover"].mean()) <= float(daily.daily["turnover"].mean()) + 1e-12
+
+
+def test_backtest_summary_metrics_are_finite_with_cost_inputs() -> None:
+    res = run_backtest(
+        _preds(),
+        topn=2,
+        long_short=False,
+        max_names=2,
+        single_name_cap=0.6,
+        rebalance="daily",
+        commission_bps=1.0,
+        slippage_base_bps=1.0,
+        slippage_k_adv=5.0,
+        slippage_k_vol=3.0,
+    )
+    for k in ["sharpe", "max_drawdown", "avg_turnover", "avg_cost", "total_return"]:
+        assert np.isfinite(float(res.summary[k]))

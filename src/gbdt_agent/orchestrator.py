@@ -203,6 +203,7 @@ def run_pipeline(
         "code_hash": code_hash,
         "status": "running",
         "errors": [],
+        "historical_errors": [],
     }
 
     metrics_path = run_dir / "metrics.json"
@@ -210,7 +211,11 @@ def run_pipeline(
         old = json.loads(metrics_path.read_text())
         if isinstance(old, dict):
             old.update({"run_id": run_id, "conf_hash": conf_hash_val, "code_hash": code_hash, "status": "running"})
-            old.setdefault("errors", [])
+            old_errors = old.get("errors") if isinstance(old.get("errors"), list) else []
+            old_hist = old.get("historical_errors") if isinstance(old.get("historical_errors"), list) else []
+            old["historical_errors"] = (old_hist + old_errors)[-200:]
+            # Keep only active errors for the current execution attempt.
+            old["errors"] = []
             metrics = old
 
     state_payload: Dict[str, Any] = {
@@ -258,6 +263,7 @@ def run_pipeline(
         _write_json(metrics_path, metrics)
 
     def _write_report(status: str, errors: Optional[Any] = None) -> None:
+        report_errors = errors if errors is not None else metrics.get("errors")
         report = render_report_md(
             cfg=cfg,
             run_id=run_id,
@@ -269,11 +275,13 @@ def run_pipeline(
             split_info=metrics.get("split_info"),
             validation=metrics.get("validation"),
             leakage=metrics.get("leakage"),
+            training_info=metrics.get("training_info"),
             model_metrics=metrics.get("model_metrics"),
             chosen_model=(metrics.get("backtest") or {}).get("chosen_model"),
             backtest_summary=(metrics.get("backtest") or {}).get("summary"),
             status=status,
-            errors=errors,
+            errors=report_errors,
+            historical_errors=metrics.get("historical_errors"),
         )
         write_report(run_dir / "report.md", report)
 
@@ -611,6 +619,10 @@ def run_pipeline(
             return run_id
 
         # Stage 80
+        if isinstance(metrics.get("errors"), list) and metrics["errors"]:
+            hist = metrics.get("historical_errors") if isinstance(metrics.get("historical_errors"), list) else []
+            metrics["historical_errors"] = (hist + metrics["errors"])[-200:]
+            metrics["errors"] = []
         metrics["status"] = "success"
         _write_metrics()
         _write_report("SUCCESS")

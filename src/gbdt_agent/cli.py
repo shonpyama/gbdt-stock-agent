@@ -10,7 +10,7 @@ import pandas as pd
 
 from .colab import restore_runtime_from_drive, sync_runtime_to_drive
 from .config import load_config
-from .fmp_client import FMPClient, cache_key
+from .fmp_client import FMPClient, cache_key, resolve_fmp_api_key
 from .migrate import pack_bundle, restore_bundle
 from .orchestrator import run_pipeline
 from .paths import ProjectPaths
@@ -44,7 +44,8 @@ def cmd_preflight(args: argparse.Namespace) -> int:
     try:
         import os
 
-        out["checks"]["api_key_env"] = bool(os.environ.get("FMP_API_KEY"))
+        api_key = resolve_fmp_api_key()
+        out["checks"]["api_key_env"] = bool(api_key)
         if not out["checks"]["api_key_env"]:
             raise RuntimeError("Missing FMP_API_KEY")
 
@@ -65,10 +66,8 @@ def cmd_preflight(args: argparse.Namespace) -> int:
         print(json.dumps(out, indent=2, ensure_ascii=True))
         return 0 if out["ok"] else 1
     except Exception as exc:
-        import os
-
         msg = f"{type(exc).__name__}: {exc}"
-        key = os.environ.get("FMP_API_KEY", "")
+        key = resolve_fmp_api_key() or ""
         if key:
             msg = msg.replace(key, "****")
         out["error"] = msg
@@ -111,11 +110,13 @@ def cmd_report(args: argparse.Namespace) -> int:
         split_info=metrics.get("split_info"),
         validation=metrics.get("validation"),
         leakage=metrics.get("leakage"),
+        training_info=metrics.get("training_info"),
         model_metrics=metrics.get("model_metrics"),
         chosen_model=(metrics.get("backtest") or {}).get("chosen_model"),
         backtest_summary=(metrics.get("backtest") or {}).get("summary"),
         status=str(metrics.get("status", "unknown")),
         errors=metrics.get("errors"),
+        historical_errors=metrics.get("historical_errors"),
     )
     out = run_dir / "report.md"
     write_report(out, report)

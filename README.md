@@ -16,6 +16,7 @@ source .venv/bin/activate
 pip install -e .
 
 export FMP_API_KEY="..."
+# or put key in /content/.env_fmp (or path in FMP_API_KEY_FILE)
 python -m gbdt_agent.cli preflight --conf conf/default.yaml
 python -m gbdt_agent.cli run --conf conf/default.yaml --resume
 ```
@@ -38,5 +39,6 @@ python -m gbdt_agent.cli run --conf conf/default.yaml --resume
 - `reports/`: 差分/レビュー/移行前報告
 
 ## 注意
-- APIキーは `FMP_API_KEY` 環境変数のみを利用し、平文保存しません。
+- APIキーは `FMP_API_KEY` を優先し、未設定時は `/content/.env_fmp`（または `FMP_API_KEY_FILE` 指定ファイル）を参照します。
 - ログはキー値をマスクします。
+- LightGBM は `models.gbdt.prefer_gpu` (既定: `true`) でGPUを自動利用し、利用不可時はCPUへ自動フォールバックします。

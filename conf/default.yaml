@@ -16,7 +16,7 @@ universe:
 data:
   start_date: "2020-01-01"
   end_date: ""
-  adjusted_flag: true
+  adjusted_flag: false
   endpoints_version:
     - "sp500_constituent"
     - "historical_sp500_constituent"
@@ -90,6 +90,7 @@ models:
   gbdt:
     enabled: true
     framework: "lightgbm"
+    prefer_gpu: true
     params: {}
 
 backtest:

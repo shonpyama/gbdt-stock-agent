@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import random
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -18,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 API_KEY_PARAM = "apikey"
+DEFAULT_API_KEY_FILES = [Path("/content/.env_fmp")]
 
 DEFAULT_ENDPOINTS = {
     "sp500_constituent": "sp500-constituent",
@@ -66,6 +68,72 @@ def _cache_file(cache_dir: Path, key: str) -> Path:
     return cache_dir / f"{key}.json"
 
 
+def _strip_quotes(value: str) -> str:
+    v = value.strip()
+    if len(v) >= 2 and ((v[0] == "'" and v[-1] == "'") or (v[0] == '"' and v[-1] == '"')):
+        return v[1:-1].strip()
+    return v
+
+
+def _parse_api_key_line(line: str) -> Optional[str]:
+    s = line.strip()
+    if not s or s.startswith("#"):
+        return None
+    if s.startswith("export "):
+        s = s[len("export ") :].strip()
+    m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$", s)
+    if m:
+        name = m.group(1)
+        value = m.group(2).strip()
+        if name != "FMP_API_KEY":
+            return None
+        quoted = re.match(r"""^(['"])(.*?)\1(?:\s*#.*)?$""", value)
+        if quoted:
+            return quoted.group(2).strip() or None
+        # For unquoted values, allow trailing inline comments.
+        value = value.split("#", 1)[0].strip()
+        return _strip_quotes(value) or None
+    # Plain key file support: accept a bare token line only.
+    if "=" in s:
+        return None
+    if any(ch.isspace() for ch in s):
+        return None
+    return _strip_quotes(s) or None
+
+
+def _load_api_key_from_file(path: Path) -> Optional[str]:
+    if not path.exists() or not path.is_file():
+        return None
+    try:
+        for raw in path.read_text().splitlines():
+            key = _parse_api_key_line(raw)
+            if key:
+                return key
+    except Exception:
+        return None
+    return None
+
+
+def resolve_fmp_api_key() -> Optional[str]:
+    import os
+
+    env_key = os.environ.get("FMP_API_KEY")
+    if env_key:
+        return env_key
+
+    candidates: list[Path] = []
+    key_file_env = os.environ.get("FMP_API_KEY_FILE")
+    if key_file_env:
+        candidates.append(Path(key_file_env).expanduser())
+    candidates.extend(DEFAULT_API_KEY_FILES)
+
+    for p in candidates:
+        key = _load_api_key_from_file(p)
+        if key:
+            return key
+    return None
+
+
 class RateLimiter:
     def __init__(self, max_calls_per_minute: int):
         self.max_calls_per_minute = max(1, int(max_calls_per_minute))
@@ -107,11 +175,9 @@ class FMPClient:
 
     @staticmethod
     def from_env(cache_dir: Path, cfg_overrides: Optional[Dict[str, Any]] = None) -> "FMPClient":
-        import os
-
-        api_key = os.environ.get("FMP_API_KEY")
+        api_key = resolve_fmp_api_key()
         if not api_key:
-            raise RuntimeError("Missing FMP_API_KEY environment variable")
+            raise RuntimeError("Missing FMP_API_KEY (env var or /content/.env_fmp)")
         cfg_overrides = cfg_overrides or {}
         rate = cfg_overrides.get("rate_limit", {}) if isinstance(cfg_overrides.get("rate_limit", {}), dict) else {}
         retry = cfg_overrides.get("retry", {}) if isinstance(cfg_overrides.get("retry", {}), dict) else {}
@@ -150,6 +216,7 @@ class FMPClient:
         *,
         force: bool = False,
         endpoint_name: Optional[str] = None,
+        max_attempts: Optional[int] = None,
     ) -> Any:
         endpoint = endpoint.lstrip("/")
         url_path = f"{self.cfg.base_url.rstrip('/')}/{endpoint}"
@@ -168,6 +235,7 @@ class FMPClient:
 
         params[API_KEY_PARAM] = self.cfg.api_key
         self.rate_limiter.acquire()
+        attempts_limit = max(1, int(max_attempts if max_attempts is not None else self.cfg.retry_max_attempts))
 
         attempt = 0
         while True:
@@ -189,7 +257,7 @@ class FMPClient:
                     return data
 
                 retryable = status in (429, 500, 502, 503, 504)
-                if not retryable or attempt >= self.cfg.retry_max_attempts:
+                if not retryable or attempt >= attempts_limit:
                     body = None
                     try:
                         body = resp.text[:500]
@@ -210,7 +278,7 @@ class FMPClient:
                     sleep_s = base * (2 ** (attempt - 1)) + random.random() * 0.1
                 time.sleep(min(60.0, max(0.1, sleep_s)))
             except Exception as e:
-                if attempt >= self.cfg.retry_max_attempts:
+                if attempt >= attempts_limit:
                     raise RuntimeError(f"request_failed endpoint={endpoint} err={type(e).__name__}") from e
                 base = self.cfg.retry_backoff_base_seconds
                 sleep_s = base * (2 ** (attempt - 1)) + random.random() * 0.1
@@ -263,7 +331,8 @@ class FMPClient:
 
     def get_earnings_surprises(self, symbol: str) -> Any:
         ep = self.endpoint_for("earnings_surprises")
-        return self.request(ep, params={"symbol": symbol}, endpoint_name="earnings_surprises")
+        # Best-effort endpoint: avoid long retry tails when unavailable.
+        return self.request(ep, params={"symbol": symbol}, endpoint_name="earnings_surprises", max_attempts=1)
 
     def get_income_statement(self, symbol: str, period: str = "quarter", limit: int = 40) -> Any:
         ep = self.endpoint_for("income_statement")

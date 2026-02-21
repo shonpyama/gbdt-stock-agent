@@ -215,3 +215,34 @@ def test_pipeline_fails_on_deliberate_leak(monkeypatch, tmp_path: Path) -> None:
     assert ei.value.stage == "stage_40_split_leakcheck_failed"
     state = json.loads((project_dir / "state" / "last_run_state.json").read_text())
     assert state["stage"] == "stage_40_split_leakcheck_failed"
+
+
+def test_resume_archives_old_errors_in_metrics(monkeypatch, tmp_path: Path) -> None:
+    project_dir = tmp_path / "qp_proj_resume_errors"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    conf = _make_conf(project_dir)
+    conf_path = project_dir / "conf.yaml"
+    conf_path.write_text(yaml.safe_dump(conf, sort_keys=False))
+    _install_fakes(monkeypatch, project_dir)
+
+    original_train_models = rexp.train_models
+    calls = {"n": 0}
+
+    def flaky_train_models(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("synthetic training failure")
+        return original_train_models(*args, **kwargs)
+
+    monkeypatch.setattr(rexp, "train_models", flaky_train_models)
+
+    with pytest.raises(RuntimeError):
+        rexp.run_pipeline(project_dir=project_dir, conf_path=conf_path, resume=False, force_unlock=True)
+
+    run_id = json.loads((project_dir / "state" / "last_run_state.json").read_text())["run_id"]
+    rexp.run_pipeline(project_dir=project_dir, conf_path=conf_path, resume=True, force_unlock=True)
+
+    metrics = json.loads((project_dir / "artifacts" / "runs" / run_id / "metrics.json").read_text())
+    assert metrics["status"] == "success"
+    assert metrics.get("errors") == []
+    assert len(metrics.get("historical_errors") or []) >= 1

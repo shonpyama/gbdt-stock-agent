@@ -1,0 +1,16 @@
+ .gitignore                     |   3 +
+ README.md                      |   4 +-
+ conf/default.yaml              |   3 +-
+ conf/smoke_local.yaml          |   1 +
+ src/gbdt_agent/backtest.py     |  25 +++++++-
+ src/gbdt_agent/cli.py          |  11 ++--
+ src/gbdt_agent/data_store.py   |  64 +++++++++++++-------
+ src/gbdt_agent/fmp_client.py   |  83 ++++++++++++++++++++++---
+ src/gbdt_agent/models/gbdt.py  | 134 ++++++++++++++++++++++++++++++++++++++---
+ src/gbdt_agent/orchestrator.py |  16 ++++-
+ src/gbdt_agent/reporting.py    |  30 +++++++--
+ src/gbdt_agent/training.py     |  13 +++-
+ src/gbdt_agent/transition.py   |  24 +++++++-
+ tests/test_backtest.py         |  18 ++++++
+ tests/test_pipeline_synth.py   |  31 ++++++++++
+ 15 files changed, 400 insertions(+), 60 deletions(-)

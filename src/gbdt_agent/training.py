@@ -84,7 +84,8 @@ def train_models(
     mcfg = models_cfg.get("gbdt", {}) or {}
     framework = str(mcfg.get("framework", "lightgbm"))
     params = mcfg.get("params", {}) or {}
-    model = GBDTRegressor(seed=seed, framework=framework, params=params)
+    prefer_gpu = bool(mcfg.get("prefer_gpu", True))
+    model = GBDTRegressor(seed=seed, framework=framework, params=params, prefer_gpu=prefer_gpu)
     model.fit(X_train, y_train, X_val, y_val)
     yhat_val = model.predict(X_val)
     val_mse = float(np.mean((yhat_val - y_val) ** 2))
@@ -96,6 +97,14 @@ def train_models(
         path = out_dir / "gbdt_model.pkl"
     model.save(path)
     ckpts["gbdt"] = str(path)
-    info["gbdt"] = {"framework": model.framework, "params": params, "val_mse": val_mse}
+    info["gbdt"] = {
+        "framework": model.framework,
+        "prefer_gpu": prefer_gpu,
+        "gpu_attempted": bool(model.gpu_attempted),
+        "accelerator": model.train_accelerator,
+        "params": params,
+        "effective_params": model.trained_params or params,
+        "val_mse": val_mse,
+    }
 
     return TrainResult(model_ckpt_paths=ckpts, training_info=info)

@@ -57,6 +57,14 @@ def run_backtest(
     daily_rows = []
     pos_rows = []
 
+    def _safe_mean(v: pd.Series) -> float:
+        if not isinstance(v, pd.Series):
+            return 0.0
+        x = pd.to_numeric(v, errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+        if x.empty:
+            return 0.0
+        return float(x.mean())
+
     for d, g in df.groupby("decision_date"):
         g = g.copy()
         g["y_pred"] = pd.to_numeric(g["y_pred"], errors="coerce")
@@ -116,15 +124,26 @@ def run_backtest(
         # Costs: commission + slippage (simple, feature-driven).
         commission = (commission_bps / 10000.0) * turnover
 
-        adv = pd.to_numeric(pos.get("adv20_dollar"), errors="coerce") if "adv20_dollar" in pos.columns else pd.Series([np.nan] * len(pos))
-        vol = pd.to_numeric(pos.get("vol_20d"), errors="coerce") if "vol_20d" in pos.columns else pd.Series([np.nan] * len(pos))
+        pos_idx = pos.set_index("symbol", drop=False)
+        adv = (
+            pd.to_numeric(pos_idx["adv20_dollar"], errors="coerce").reindex(w_now.index)
+            if "adv20_dollar" in pos_idx.columns
+            else pd.Series([np.nan] * len(w_now), index=w_now.index)
+        )
+        vol = (
+            pd.to_numeric(pos_idx["vol_20d"], errors="coerce").reindex(w_now.index)
+            if "vol_20d" in pos_idx.columns
+            else pd.Series([np.nan] * len(w_now), index=w_now.index)
+        )
 
         # Approx trade dollars per symbol: |delta_w| * notional (use current delta vs prev).
         dw = (w_now - prev_w.reindex(w_now.index, fill_value=0.0)).abs().rename("abs_delta_w")
         trade_dollar = dw * float(notional)
         adv_safe = adv.fillna(1e12).replace(0, 1e12)
         vol_safe = vol.fillna(0.0)
-        slip_bps = float(slippage_base_bps) + float(slippage_k_adv) * float((trade_dollar / adv_safe).mean()) + float(slippage_k_vol) * float(vol_safe.mean())
+        impact_adv = _safe_mean(trade_dollar / adv_safe)
+        impact_vol = _safe_mean(vol_safe)
+        slip_bps = float(slippage_base_bps) + float(slippage_k_adv) * impact_adv + float(slippage_k_vol) * impact_vol
         slippage = (slip_bps / 10000.0) * turnover
 
         total_cost = float(commission + slippage)

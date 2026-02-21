@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -22,6 +23,7 @@ from .paths import ProjectPaths
 
 
 logger = logging.getLogger(__name__)
+_TICKER_RE = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,9}$")
 
 
 def _ensure_date_str(value: Optional[str | date]) -> Optional[str]:
@@ -42,9 +44,12 @@ def _parse_date(value: Any) -> Optional[date]:
     if isinstance(value, date):
         return value
     try:
-        return pd.to_datetime(value).date()
+        ts = pd.to_datetime(value, errors="coerce")
     except Exception:
         return None
+    if ts is None or pd.isna(ts):
+        return None
+    return ts.date()
 
 
 def dataset_id_from_spec(spec: Dict[str, Any]) -> str:
@@ -91,12 +96,14 @@ def _extract_symbol(value: Any) -> Optional[str]:
         return None
     if isinstance(value, str):
         s = value.strip().upper()
-        return s or None
+        return s if (s and _TICKER_RE.match(s)) else None
     if isinstance(value, dict):
         for k in ("symbol", "ticker", "Symbol", "Ticker"):
             v = value.get(k)
             if isinstance(v, str) and v.strip():
-                return v.strip().upper()
+                s = v.strip().upper()
+                if _TICKER_RE.match(s):
+                    return s
     return None
 
 
@@ -394,29 +401,40 @@ def update_data(
         last_date_existing = prices_existing["date"].max().date()
 
     fetch_from = start
+    fetch_end = end
+    skip_price_fetch = False
     if last_date_existing is not None and str(last_date_existing) >= start:
-        fetch_from = (pd.Timestamp(last_date_existing) + pd.Timedelta(days=1)).date().isoformat()
+        # Incremental refresh starts from the next business day after existing max date.
+        fetch_from_date = (pd.Timestamp(last_date_existing) + BDay(1)).date()
+        fetch_end_date = pd.to_datetime(fetch_end).date()
+        if fetch_from_date > fetch_end_date:
+            skip_price_fetch = True
+        else:
+            fetch_from = fetch_from_date.isoformat()
 
     price_rows: List[pd.DataFrame] = []
-    for sym in tqdm(symbols, desc="fetch_prices"):
-        payload = fmp.get_prices(sym, fetch_from if fetch_from else None, end if end else None)
-        if not isinstance(payload, list):
-            continue
-        df = pd.DataFrame(payload)
-        if df.empty:
-            continue
-        df["symbol"] = sym
-        # Normalize columns
-        rename = {}
-        if "adjClose" in df.columns:
-            rename["adjClose"] = "adj_close"
-        if "unadjustedClose" in df.columns:
-            rename["unadjustedClose"] = "unadjusted_close"
-        df = df.rename(columns=rename)
-        keep = [c for c in ["date", "open", "high", "low", "close", "adj_close", "volume"] if c in df.columns]
-        df = df[keep + ["symbol"]]
-        df["date"] = pd.to_datetime(df["date"]).dt.date
-        price_rows.append(df)
+    if skip_price_fetch:
+        logger.info(f"skip_price_incremental_fetch no_new_business_day fetch_from>{fetch_end}")
+    else:
+        for sym in tqdm(symbols, desc="fetch_prices"):
+            payload = fmp.get_prices(sym, fetch_from if fetch_from else None, end if end else None)
+            if not isinstance(payload, list):
+                continue
+            df = pd.DataFrame(payload)
+            if df.empty:
+                continue
+            df["symbol"] = sym
+            # Normalize columns
+            rename = {}
+            if "adjClose" in df.columns:
+                rename["adjClose"] = "adj_close"
+            if "unadjustedClose" in df.columns:
+                rename["unadjustedClose"] = "unadjusted_close"
+            df = df.rename(columns=rename)
+            keep = [c for c in ["date", "open", "high", "low", "close", "adj_close", "volume"] if c in df.columns]
+            df = df[keep + ["symbol"]]
+            df["date"] = pd.to_datetime(df["date"]).dt.date
+            price_rows.append(df)
 
     prices_new = pd.concat(price_rows, ignore_index=True) if price_rows else pd.DataFrame()
     if not prices_existing.empty and not prices_new.empty:

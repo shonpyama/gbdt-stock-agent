@@ -1,0 +1,929 @@
+diff --git a/.gitignore b/.gitignore
+index e431b62..caa874c 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -29,3 +29,6 @@ logs/
+ 
+ # Runtime
+ *.log
++
++# Generated reports
++reports/pre_colab_transition_*.md
+diff --git a/README.md b/README.md
+index 07d1f55..8e27e89 100644
+--- a/README.md
++++ b/README.md
+@@ -16,6 +16,7 @@ source .venv/bin/activate
+ pip install -e .
+ 
+ export FMP_API_KEY="..."
++# or put key in /content/.env_fmp (or path in FMP_API_KEY_FILE)
+ python -m gbdt_agent.cli preflight --conf conf/default.yaml
+ python -m gbdt_agent.cli run --conf conf/default.yaml --resume
+ ```
+@@ -38,5 +39,6 @@ python -m gbdt_agent.cli run --conf conf/default.yaml --resume
+ - `reports/`: 差分/レビュー/移行前報告
+ 
+ ## 注意
+-- APIキーは `FMP_API_KEY` 環境変数のみを利用し、平文保存しません。
++- APIキーは `FMP_API_KEY` を優先し、未設定時は `/content/.env_fmp`（または `FMP_API_KEY_FILE` 指定ファイル）を参照します。
+ - ログはキー値をマスクします。
++- LightGBM は `models.gbdt.prefer_gpu` (既定: `true`) でGPUを自動利用し、利用不可時はCPUへ自動フォールバックします。
+diff --git a/conf/default.yaml b/conf/default.yaml
+index 82055cb..5b85f09 100644
+--- a/conf/default.yaml
++++ b/conf/default.yaml
+@@ -16,7 +16,7 @@ universe:
+ data:
+   start_date: "2020-01-01"
+   end_date: ""
+-  adjusted_flag: true
++  adjusted_flag: false
+   endpoints_version:
+     - "sp500_constituent"
+     - "historical_sp500_constituent"
+@@ -90,6 +90,7 @@ models:
+   gbdt:
+     enabled: true
+     framework: "lightgbm"
++    prefer_gpu: true
+     params: {}
+ 
+ backtest:
+diff --git a/conf/smoke_local.yaml b/conf/smoke_local.yaml
+index 1fdfa2c..d2fbe42 100644
+--- a/conf/smoke_local.yaml
++++ b/conf/smoke_local.yaml
+@@ -61,6 +61,7 @@ models:
+   gbdt:
+     enabled: true
+     framework: "lightgbm"
++    prefer_gpu: true
+     params:
+       n_estimators: 300
+       learning_rate: 0.05
+diff --git a/src/gbdt_agent/backtest.py b/src/gbdt_agent/backtest.py
+index 8559e1d..ead12d7 100644
+--- a/src/gbdt_agent/backtest.py
++++ b/src/gbdt_agent/backtest.py
+@@ -57,6 +57,14 @@ def run_backtest(
+     daily_rows = []
+     pos_rows = []
+ 
++    def _safe_mean(v: pd.Series) -> float:
++        if not isinstance(v, pd.Series):
++            return 0.0
++        x = pd.to_numeric(v, errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
++        if x.empty:
++            return 0.0
++        return float(x.mean())
++
+     for d, g in df.groupby("decision_date"):
+         g = g.copy()
+         g["y_pred"] = pd.to_numeric(g["y_pred"], errors="coerce")
+@@ -116,15 +124,26 @@ def run_backtest(
+         # Costs: commission + slippage (simple, feature-driven).
+         commission = (commission_bps / 10000.0) * turnover
+ 
+-        adv = pd.to_numeric(pos.get("adv20_dollar"), errors="coerce") if "adv20_dollar" in pos.columns else pd.Series([np.nan] * len(pos))
+-        vol = pd.to_numeric(pos.get("vol_20d"), errors="coerce") if "vol_20d" in pos.columns else pd.Series([np.nan] * len(pos))
++        pos_idx = pos.set_index("symbol", drop=False)
++        adv = (
++            pd.to_numeric(pos_idx["adv20_dollar"], errors="coerce").reindex(w_now.index)
++            if "adv20_dollar" in pos_idx.columns
++            else pd.Series([np.nan] * len(w_now), index=w_now.index)
++        )
++        vol = (
++            pd.to_numeric(pos_idx["vol_20d"], errors="coerce").reindex(w_now.index)
++            if "vol_20d" in pos_idx.columns
++            else pd.Series([np.nan] * len(w_now), index=w_now.index)
++        )
+ 
+         # Approx trade dollars per symbol: |delta_w| * notional (use current delta vs prev).
+         dw = (w_now - prev_w.reindex(w_now.index, fill_value=0.0)).abs().rename("abs_delta_w")
+         trade_dollar = dw * float(notional)
+         adv_safe = adv.fillna(1e12).replace(0, 1e12)
+         vol_safe = vol.fillna(0.0)
+-        slip_bps = float(slippage_base_bps) + float(slippage_k_adv) * float((trade_dollar / adv_safe).mean()) + float(slippage_k_vol) * float(vol_safe.mean())
++        impact_adv = _safe_mean(trade_dollar / adv_safe)
++        impact_vol = _safe_mean(vol_safe)
++        slip_bps = float(slippage_base_bps) + float(slippage_k_adv) * impact_adv + float(slippage_k_vol) * impact_vol
+         slippage = (slip_bps / 10000.0) * turnover
+ 
+         total_cost = float(commission + slippage)
+diff --git a/src/gbdt_agent/cli.py b/src/gbdt_agent/cli.py
+index dd2e800..df69598 100644
+--- a/src/gbdt_agent/cli.py
++++ b/src/gbdt_agent/cli.py
+@@ -10,7 +10,7 @@ import pandas as pd
+ 
+ from .colab import restore_runtime_from_drive, sync_runtime_to_drive
+ from .config import load_config
+-from .fmp_client import FMPClient, cache_key
++from .fmp_client import FMPClient, cache_key, resolve_fmp_api_key
+ from .migrate import pack_bundle, restore_bundle
+ from .orchestrator import run_pipeline
+ from .paths import ProjectPaths
+@@ -44,7 +44,8 @@ def cmd_preflight(args: argparse.Namespace) -> int:
+     try:
+         import os
+ 
+-        out["checks"]["api_key_env"] = bool(os.environ.get("FMP_API_KEY"))
++        api_key = resolve_fmp_api_key()
++        out["checks"]["api_key_env"] = bool(api_key)
+         if not out["checks"]["api_key_env"]:
+             raise RuntimeError("Missing FMP_API_KEY")
+ 
+@@ -65,10 +66,8 @@ def cmd_preflight(args: argparse.Namespace) -> int:
+         print(json.dumps(out, indent=2, ensure_ascii=True))
+         return 0 if out["ok"] else 1
+     except Exception as exc:
+-        import os
+-
+         msg = f"{type(exc).__name__}: {exc}"
+-        key = os.environ.get("FMP_API_KEY", "")
++        key = resolve_fmp_api_key() or ""
+         if key:
+             msg = msg.replace(key, "****")
+         out["error"] = msg
+@@ -111,11 +110,13 @@ def cmd_report(args: argparse.Namespace) -> int:
+         split_info=metrics.get("split_info"),
+         validation=metrics.get("validation"),
+         leakage=metrics.get("leakage"),
++        training_info=metrics.get("training_info"),
+         model_metrics=metrics.get("model_metrics"),
+         chosen_model=(metrics.get("backtest") or {}).get("chosen_model"),
+         backtest_summary=(metrics.get("backtest") or {}).get("summary"),
+         status=str(metrics.get("status", "unknown")),
+         errors=metrics.get("errors"),
++        historical_errors=metrics.get("historical_errors"),
+     )
+     out = run_dir / "report.md"
+     write_report(out, report)
+diff --git a/src/gbdt_agent/data_store.py b/src/gbdt_agent/data_store.py
+index 0a9faae..ce131c1 100644
+--- a/src/gbdt_agent/data_store.py
++++ b/src/gbdt_agent/data_store.py
+@@ -2,6 +2,7 @@ from __future__ import annotations
+ 
+ import json
+ import logging
++import re
+ from dataclasses import dataclass
+ from datetime import date, datetime, timezone
+ from pathlib import Path
+@@ -22,6 +23,7 @@ from .paths import ProjectPaths
+ 
+ 
+ logger = logging.getLogger(__name__)
++_TICKER_RE = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,9}$")
+ 
+ 
+ def _ensure_date_str(value: Optional[str | date]) -> Optional[str]:
+@@ -42,9 +44,12 @@ def _parse_date(value: Any) -> Optional[date]:
+     if isinstance(value, date):
+         return value
+     try:
+-        return pd.to_datetime(value).date()
++        ts = pd.to_datetime(value, errors="coerce")
+     except Exception:
+         return None
++    if ts is None or pd.isna(ts):
++        return None
++    return ts.date()
+ 
+ 
+ def dataset_id_from_spec(spec: Dict[str, Any]) -> str:
+@@ -91,12 +96,14 @@ def _extract_symbol(value: Any) -> Optional[str]:
+         return None
+     if isinstance(value, str):
+         s = value.strip().upper()
+-        return s or None
++        return s if (s and _TICKER_RE.match(s)) else None
+     if isinstance(value, dict):
+         for k in ("symbol", "ticker", "Symbol", "Ticker"):
+             v = value.get(k)
+             if isinstance(v, str) and v.strip():
+-                return v.strip().upper()
++                s = v.strip().upper()
++                if _TICKER_RE.match(s):
++                    return s
+     return None
+ 
+ 
+@@ -394,29 +401,40 @@ def update_data(
+         last_date_existing = prices_existing["date"].max().date()
+ 
+     fetch_from = start
++    fetch_end = end
++    skip_price_fetch = False
+     if last_date_existing is not None and str(last_date_existing) >= start:
+-        fetch_from = (pd.Timestamp(last_date_existing) + pd.Timedelta(days=1)).date().isoformat()
++        # Incremental refresh starts from the next business day after existing max date.
++        fetch_from_date = (pd.Timestamp(last_date_existing) + BDay(1)).date()
++        fetch_end_date = pd.to_datetime(fetch_end).date()
++        if fetch_from_date > fetch_end_date:
++            skip_price_fetch = True
++        else:
++            fetch_from = fetch_from_date.isoformat()
+ 
+     price_rows: List[pd.DataFrame] = []
+-    for sym in tqdm(symbols, desc="fetch_prices"):
+-        payload = fmp.get_prices(sym, fetch_from if fetch_from else None, end if end else None)
+-        if not isinstance(payload, list):
+-            continue
+-        df = pd.DataFrame(payload)
+-        if df.empty:
+-            continue
+-        df["symbol"] = sym
+-        # Normalize columns
+-        rename = {}
+-        if "adjClose" in df.columns:
+-            rename["adjClose"] = "adj_close"
+-        if "unadjustedClose" in df.columns:
+-            rename["unadjustedClose"] = "unadjusted_close"
+-        df = df.rename(columns=rename)
+-        keep = [c for c in ["date", "open", "high", "low", "close", "adj_close", "volume"] if c in df.columns]
+-        df = df[keep + ["symbol"]]
+-        df["date"] = pd.to_datetime(df["date"]).dt.date
+-        price_rows.append(df)
++    if skip_price_fetch:
++        logger.info(f"skip_price_incremental_fetch no_new_business_day fetch_from>{fetch_end}")
++    else:
++        for sym in tqdm(symbols, desc="fetch_prices"):
++            payload = fmp.get_prices(sym, fetch_from if fetch_from else None, end if end else None)
++            if not isinstance(payload, list):
++                continue
++            df = pd.DataFrame(payload)
++            if df.empty:
++                continue
++            df["symbol"] = sym
++            # Normalize columns
++            rename = {}
++            if "adjClose" in df.columns:
++                rename["adjClose"] = "adj_close"
++            if "unadjustedClose" in df.columns:
++                rename["unadjustedClose"] = "unadjusted_close"
++            df = df.rename(columns=rename)
++            keep = [c for c in ["date", "open", "high", "low", "close", "adj_close", "volume"] if c in df.columns]
++            df = df[keep + ["symbol"]]
++            df["date"] = pd.to_datetime(df["date"]).dt.date
++            price_rows.append(df)
+ 
+     prices_new = pd.concat(price_rows, ignore_index=True) if price_rows else pd.DataFrame()
+     if not prices_existing.empty and not prices_new.empty:
+diff --git a/src/gbdt_agent/fmp_client.py b/src/gbdt_agent/fmp_client.py
+index 11bb89e..00dedb9 100644
+--- a/src/gbdt_agent/fmp_client.py
++++ b/src/gbdt_agent/fmp_client.py
+@@ -4,6 +4,7 @@ import hashlib
+ import json
+ import logging
+ import random
++import re
+ import time
+ from dataclasses import dataclass
+ from datetime import datetime, timezone
+@@ -18,6 +19,7 @@ logger = logging.getLogger(__name__)
+ 
+ 
+ API_KEY_PARAM = "apikey"
++DEFAULT_API_KEY_FILES = [Path("/content/.env_fmp")]
+ 
+ DEFAULT_ENDPOINTS = {
+     "sp500_constituent": "sp500-constituent",
+@@ -66,6 +68,72 @@ def _cache_file(cache_dir: Path, key: str) -> Path:
+     return cache_dir / f"{key}.json"
+ 
+ 
++def _strip_quotes(value: str) -> str:
++    v = value.strip()
++    if len(v) >= 2 and ((v[0] == "'" and v[-1] == "'") or (v[0] == '"' and v[-1] == '"')):
++        return v[1:-1].strip()
++    return v
++
++
++def _parse_api_key_line(line: str) -> Optional[str]:
++    s = line.strip()
++    if not s or s.startswith("#"):
++        return None
++    if s.startswith("export "):
++        s = s[len("export ") :].strip()
++    m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$", s)
++    if m:
++        name = m.group(1)
++        value = m.group(2).strip()
++        if name != "FMP_API_KEY":
++            return None
++        quoted = re.match(r"""^(['"])(.*?)\1(?:\s*#.*)?$""", value)
++        if quoted:
++            return quoted.group(2).strip() or None
++        # For unquoted values, allow trailing inline comments.
++        value = value.split("#", 1)[0].strip()
++        return _strip_quotes(value) or None
++    # Plain key file support: accept a bare token line only.
++    if "=" in s:
++        return None
++    if any(ch.isspace() for ch in s):
++        return None
++    return _strip_quotes(s) or None
++
++
++def _load_api_key_from_file(path: Path) -> Optional[str]:
++    if not path.exists() or not path.is_file():
++        return None
++    try:
++        for raw in path.read_text().splitlines():
++            key = _parse_api_key_line(raw)
++            if key:
++                return key
++    except Exception:
++        return None
++    return None
++
++
++def resolve_fmp_api_key() -> Optional[str]:
++    import os
++
++    env_key = os.environ.get("FMP_API_KEY")
++    if env_key:
++        return env_key
++
++    candidates: list[Path] = []
++    key_file_env = os.environ.get("FMP_API_KEY_FILE")
++    if key_file_env:
++        candidates.append(Path(key_file_env).expanduser())
++    candidates.extend(DEFAULT_API_KEY_FILES)
++
++    for p in candidates:
++        key = _load_api_key_from_file(p)
++        if key:
++            return key
++    return None
++
++
+ class RateLimiter:
+     def __init__(self, max_calls_per_minute: int):
+         self.max_calls_per_minute = max(1, int(max_calls_per_minute))
+@@ -107,11 +175,9 @@ class FMPClient:
+ 
+     @staticmethod
+     def from_env(cache_dir: Path, cfg_overrides: Optional[Dict[str, Any]] = None) -> "FMPClient":
+-        import os
+-
+-        api_key = os.environ.get("FMP_API_KEY")
++        api_key = resolve_fmp_api_key()
+         if not api_key:
+-            raise RuntimeError("Missing FMP_API_KEY environment variable")
++            raise RuntimeError("Missing FMP_API_KEY (env var or /content/.env_fmp)")
+         cfg_overrides = cfg_overrides or {}
+         rate = cfg_overrides.get("rate_limit", {}) if isinstance(cfg_overrides.get("rate_limit", {}), dict) else {}
+         retry = cfg_overrides.get("retry", {}) if isinstance(cfg_overrides.get("retry", {}), dict) else {}
+@@ -150,6 +216,7 @@ class FMPClient:
+         *,
+         force: bool = False,
+         endpoint_name: Optional[str] = None,
++        max_attempts: Optional[int] = None,
+     ) -> Any:
+         endpoint = endpoint.lstrip("/")
+         url_path = f"{self.cfg.base_url.rstrip('/')}/{endpoint}"
+@@ -168,6 +235,7 @@ class FMPClient:
+ 
+         params[API_KEY_PARAM] = self.cfg.api_key
+         self.rate_limiter.acquire()
++        attempts_limit = max(1, int(max_attempts if max_attempts is not None else self.cfg.retry_max_attempts))
+ 
+         attempt = 0
+         while True:
+@@ -189,7 +257,7 @@ class FMPClient:
+                     return data
+ 
+                 retryable = status in (429, 500, 502, 503, 504)
+-                if not retryable or attempt >= self.cfg.retry_max_attempts:
++                if not retryable or attempt >= attempts_limit:
+                     body = None
+                     try:
+                         body = resp.text[:500]
+@@ -210,7 +278,7 @@ class FMPClient:
+                     sleep_s = base * (2 ** (attempt - 1)) + random.random() * 0.1
+                 time.sleep(min(60.0, max(0.1, sleep_s)))
+             except Exception as e:
+-                if attempt >= self.cfg.retry_max_attempts:
++                if attempt >= attempts_limit:
+                     raise RuntimeError(f"request_failed endpoint={endpoint} err={type(e).__name__}") from e
+                 base = self.cfg.retry_backoff_base_seconds
+                 sleep_s = base * (2 ** (attempt - 1)) + random.random() * 0.1
+@@ -263,7 +331,8 @@ class FMPClient:
+ 
+     def get_earnings_surprises(self, symbol: str) -> Any:
+         ep = self.endpoint_for("earnings_surprises")
+-        return self.request(ep, params={"symbol": symbol}, endpoint_name="earnings_surprises")
++        # Best-effort endpoint: avoid long retry tails when unavailable.
++        return self.request(ep, params={"symbol": symbol}, endpoint_name="earnings_surprises", max_attempts=1)
+ 
+     def get_income_statement(self, symbol: str, period: str = "quarter", limit: int = 40) -> Any:
+         ep = self.endpoint_for("income_statement")
+diff --git a/src/gbdt_agent/models/gbdt.py b/src/gbdt_agent/models/gbdt.py
+index b1b7398..0341038 100644
+--- a/src/gbdt_agent/models/gbdt.py
++++ b/src/gbdt_agent/models/gbdt.py
+@@ -1,12 +1,17 @@
+ from __future__ import annotations
+ 
+ import json
++import logging
+ import pickle
++import subprocess
+ from dataclasses import dataclass
+ from pathlib import Path
+ from typing import Any, Dict, Optional
+ 
+ import numpy as np
++import pandas as pd
++
++logger = logging.getLogger(__name__)
+ 
+ 
+ try:
+@@ -31,7 +36,41 @@ class GBDTRegressor:
+     seed: int = 42
+     framework: str = "lightgbm"  # lightgbm | xgboost | sklearn
+     params: Optional[Dict[str, Any]] = None
++    prefer_gpu: bool = True
+     model: Any = None
++    trained_params: Optional[Dict[str, Any]] = None
++    train_accelerator: str = "cpu"
++    gpu_attempted: bool = False
++
++    @staticmethod
++    def _has_nvidia_gpu() -> bool:
++        try:
++            out = subprocess.check_output(
++                ["nvidia-smi", "-L"],
++                stderr=subprocess.STDOUT,
++                text=True,
++                timeout=3,
++            )
++            return "GPU " in out
++        except Exception:
++            return False
++
++    @staticmethod
++    def _is_gpu_device(value: Any) -> bool:
++        if value is None:
++            return False
++        return str(value).strip().lower() in {"gpu", "cuda"}
++
++    @staticmethod
++    def _select_lightgbm_params(params: Dict[str, Any], *, prefer_gpu: bool, gpu_available: bool) -> tuple[Dict[str, Any], bool]:
++        out = dict(params)
++        if "device_type" in out or "device" in out:
++            dev = out.get("device_type", out.get("device"))
++            return out, GBDTRegressor._is_gpu_device(dev)
++        if prefer_gpu and gpu_available:
++            out["device_type"] = "gpu"
++            return out, True
++        return out, False
+ 
+     def fit(self, X_train: np.ndarray, y_train: np.ndarray, X_val: np.ndarray, y_val: np.ndarray) -> None:
+         params = dict(self.params or {})
+@@ -46,15 +85,50 @@ class GBDTRegressor:
+                 "random_state": self.seed,
+                 "n_jobs": -1,
+             }
+-            default.update(params)
+-            self.model = lgb.LGBMRegressor(**default)
+-            self.model.fit(
+-                X_train,
+-                y_train,
+-                eval_set=[(X_val, y_val)],
+-                eval_metric="l2",
+-                callbacks=[lgb.early_stopping(stopping_rounds=50, verbose=False)],
++            requested_params = dict(default)
++            requested_params.update(params)
++            explicit_device = "device_type" in params or "device" in params
++
++            fit_params, gpu_requested = self._select_lightgbm_params(
++                requested_params,
++                prefer_gpu=bool(self.prefer_gpu),
++                gpu_available=self._has_nvidia_gpu(),
+             )
++            self.gpu_attempted = gpu_requested
++
++            def _fit_with(p: Dict[str, Any]) -> None:
++                self.model = lgb.LGBMRegressor(**p)
++                self.model.fit(
++                    X_train,
++                    y_train,
++                    eval_set=[(X_val, y_val)],
++                    eval_metric="l2",
++                    callbacks=[lgb.early_stopping(stopping_rounds=50, verbose=False)],
++                )
++
++            if gpu_requested and not explicit_device:
++                try:
++                    _fit_with(fit_params)
++                    self.trained_params = dict(fit_params)
++                    self.train_accelerator = "gpu"
++                    return
++                except Exception as exc:
++                    logger.warning(
++                        "lightgbm_gpu_auto_fallback_to_cpu reason=%s",
++                        type(exc).__name__,
++                    )
++                    cpu_params = dict(requested_params)
++                    cpu_params.pop("device_type", None)
++                    cpu_params.pop("device", None)
++                    _fit_with(cpu_params)
++                    self.trained_params = dict(cpu_params)
++                    self.train_accelerator = "cpu"
++                    return
++
++            _fit_with(fit_params)
++            self.trained_params = dict(fit_params)
++            dev = fit_params.get("device_type", fit_params.get("device"))
++            self.train_accelerator = "gpu" if self._is_gpu_device(dev) else "cpu"
+             return
+ 
+         if self.framework == "xgboost" and xgb is not None:
+@@ -77,6 +151,11 @@ class GBDTRegressor:
+                 verbose=False,
+                 early_stopping_rounds=50,
+             )
++            self.trained_params = dict(default)
++            device = default.get("device")
++            tree_method = str(default.get("tree_method", "")).strip().lower()
++            self.train_accelerator = "gpu" if self._is_gpu_device(device) or tree_method == "gpu_hist" else "cpu"
++            self.gpu_attempted = self.train_accelerator == "gpu"
+             return
+ 
+         if GradientBoostingRegressor is None:
+@@ -84,6 +163,9 @@ class GBDTRegressor:
+             x_aug = np.concatenate([np.ones((X_train.shape[0], 1)), X_train], axis=1)
+             coef, *_ = np.linalg.lstsq(x_aug, y_train, rcond=None)
+             self.model = {"coef": coef.tolist()}
++            self.trained_params = {}
++            self.train_accelerator = "cpu"
++            self.gpu_attempted = False
+             return
+         self.framework = "sklearn"
+         default = {
+@@ -94,6 +176,9 @@ class GBDTRegressor:
+         }
+         self.model = GradientBoostingRegressor(**default)
+         self.model.fit(X_train, y_train)
++        self.trained_params = dict(default)
++        self.train_accelerator = "cpu"
++        self.gpu_attempted = False
+ 
+     def predict(self, X: np.ndarray) -> np.ndarray:
+         if self.model is None:
+@@ -102,6 +187,18 @@ class GBDTRegressor:
+             coef = np.asarray(self.model["coef"], dtype=float)
+             x_aug = np.concatenate([np.ones((X.shape[0], 1)), X], axis=1)
+             return np.asarray(x_aug @ coef, dtype=float)
++        if self.framework == "lightgbm" and lgb is not None:
++            x_arr = np.asarray(X, dtype=float)
++            try:
++                booster = getattr(self.model, "booster_", None) or getattr(self.model, "_Booster", None)
++                if booster is not None:
++                    feature_names = list(booster.feature_name() or [])
++                    if feature_names and len(feature_names) == x_arr.shape[1]:
++                        x_df = pd.DataFrame(x_arr, columns=feature_names)
++                        return np.asarray(self.model.predict(x_df), dtype=float)
++            except Exception:
++                pass
++            return np.asarray(self.model.predict(x_arr), dtype=float)
+         return np.asarray(self.model.predict(X), dtype=float)
+ 
+     def save(self, path: str | Path) -> None:
+@@ -110,7 +207,15 @@ class GBDTRegressor:
+         path = Path(path)
+         path.parent.mkdir(parents=True, exist_ok=True)
+ 
+-        meta = {"framework": self.framework, "seed": self.seed, "params": self.params or {}}
++        meta = {
++            "framework": self.framework,
++            "seed": self.seed,
++            "params": self.params or {},
++            "prefer_gpu": bool(self.prefer_gpu),
++            "trained_params": self.trained_params or {},
++            "train_accelerator": self.train_accelerator,
++            "gpu_attempted": bool(self.gpu_attempted),
++        }
+         (path.with_suffix(path.suffix + ".meta.json")).write_text(json.dumps(meta, indent=2, ensure_ascii=True))
+ 
+         if self.framework == "lightgbm":
+@@ -131,7 +236,11 @@ class GBDTRegressor:
+         framework = meta.get("framework", "lightgbm")
+         seed = int(meta.get("seed", 42))
+         params = meta.get("params", {})
+-        obj = cls(seed=seed, framework=framework, params=params)
++        obj = cls(seed=seed, framework=framework, params=params, prefer_gpu=bool(meta.get("prefer_gpu", True)))
++        if isinstance(meta.get("trained_params"), dict):
++            obj.trained_params = meta.get("trained_params")
++        obj.train_accelerator = str(meta.get("train_accelerator", "cpu"))
++        obj.gpu_attempted = bool(meta.get("gpu_attempted", False))
+ 
+         if framework == "lightgbm":
+             if lgb is None:
+@@ -139,6 +248,11 @@ class GBDTRegressor:
+             booster = lgb.Booster(model_file=str(path))
+             wrapper = lgb.LGBMRegressor(**(params or {}))
+             wrapper._Booster = booster
++            # Mark as fitted so sklearn compatibility checks pass on predict().
++            wrapper.fitted_ = True
++            n_features = booster.num_feature()
++            wrapper._n_features = n_features
++            wrapper._n_features_in = n_features
+             obj.model = wrapper
+             return obj
+ 
+diff --git a/src/gbdt_agent/orchestrator.py b/src/gbdt_agent/orchestrator.py
+index 857e97f..043a094 100644
+--- a/src/gbdt_agent/orchestrator.py
++++ b/src/gbdt_agent/orchestrator.py
+@@ -203,6 +203,7 @@ def run_pipeline(
+         "code_hash": code_hash,
+         "status": "running",
+         "errors": [],
++        "historical_errors": [],
+     }
+ 
+     metrics_path = run_dir / "metrics.json"
+@@ -210,7 +211,11 @@ def run_pipeline(
+         old = json.loads(metrics_path.read_text())
+         if isinstance(old, dict):
+             old.update({"run_id": run_id, "conf_hash": conf_hash_val, "code_hash": code_hash, "status": "running"})
+-            old.setdefault("errors", [])
++            old_errors = old.get("errors") if isinstance(old.get("errors"), list) else []
++            old_hist = old.get("historical_errors") if isinstance(old.get("historical_errors"), list) else []
++            old["historical_errors"] = (old_hist + old_errors)[-200:]
++            # Keep only active errors for the current execution attempt.
++            old["errors"] = []
+             metrics = old
+ 
+     state_payload: Dict[str, Any] = {
+@@ -258,6 +263,7 @@ def run_pipeline(
+         _write_json(metrics_path, metrics)
+ 
+     def _write_report(status: str, errors: Optional[Any] = None) -> None:
++        report_errors = errors if errors is not None else metrics.get("errors")
+         report = render_report_md(
+             cfg=cfg,
+             run_id=run_id,
+@@ -269,11 +275,13 @@ def run_pipeline(
+             split_info=metrics.get("split_info"),
+             validation=metrics.get("validation"),
+             leakage=metrics.get("leakage"),
++            training_info=metrics.get("training_info"),
+             model_metrics=metrics.get("model_metrics"),
+             chosen_model=(metrics.get("backtest") or {}).get("chosen_model"),
+             backtest_summary=(metrics.get("backtest") or {}).get("summary"),
+             status=status,
+-            errors=errors,
++            errors=report_errors,
++            historical_errors=metrics.get("historical_errors"),
+         )
+         write_report(run_dir / "report.md", report)
+ 
+@@ -611,6 +619,10 @@ def run_pipeline(
+             return run_id
+ 
+         # Stage 80
++        if isinstance(metrics.get("errors"), list) and metrics["errors"]:
++            hist = metrics.get("historical_errors") if isinstance(metrics.get("historical_errors"), list) else []
++            metrics["historical_errors"] = (hist + metrics["errors"])[-200:]
++            metrics["errors"] = []
+         metrics["status"] = "success"
+         _write_metrics()
+         _write_report("SUCCESS")
+diff --git a/src/gbdt_agent/reporting.py b/src/gbdt_agent/reporting.py
+index e3e6a44..daa7580 100644
+--- a/src/gbdt_agent/reporting.py
++++ b/src/gbdt_agent/reporting.py
+@@ -54,11 +54,13 @@ def render_report_md(
+     split_info: Optional[Dict[str, Any]],
+     validation: Optional[Dict[str, Any]],
+     leakage: Optional[Dict[str, Any]],
++    training_info: Optional[Dict[str, Any]],
+     model_metrics: Optional[Dict[str, Any]],
+     chosen_model: Optional[str],
+     backtest_summary: Optional[Dict[str, Any]],
+     status: str,
+     errors: Optional[Any],
++    historical_errors: Optional[Any] = None,
+ ) -> str:
+     run = cfg.get("run", {}) or {}
+     data = cfg.get("data", {}) or {}
+@@ -156,6 +158,17 @@ def render_report_md(
+         lines.append("- (no model metrics recorded)")
+         lines.append("")
+ 
++    lines.append("## Training Runtime")
++    lines.append("")
++    gbdt_train = (training_info or {}).get("gbdt") if isinstance(training_info, dict) else None
++    if isinstance(gbdt_train, dict):
++        for k in ["framework", "accelerator", "gpu_attempted", "prefer_gpu", "val_mse"]:
++            if k in gbdt_train:
++                lines.append(f"- {k}: `{gbdt_train.get(k)}`")
++    else:
++        lines.append("- (no training runtime recorded)")
++    lines.append("")
++
+     lines.append("## Backtest")
+     lines.append("")
+ 
+@@ -188,12 +201,21 @@ def render_report_md(
+     lines.append("```")
+     lines.append("")
+ 
+-    if errors:
++    errs = errors if isinstance(errors, list) else []
++    hist_errs = historical_errors if isinstance(historical_errors, list) else []
++    if status.upper() == "SUCCESS" and errs and not hist_errs:
++        # Backward compatibility for older metrics that stored only `errors`.
++        hist_errs = list(errs)
++        errs = []
++    if errs or hist_errs:
+         lines.append("## Errors")
+         lines.append("")
+-        lines.append("```")
+-        lines.append(json.dumps(errors, indent=2, ensure_ascii=True) if not isinstance(errors, str) else errors)
+-        lines.append("```")
++        lines.append(f"- active_error_count: `{len(errs)}`")
++        lines.append(f"- historical_error_count: `{len(hist_errs)}`")
++        if errs:
++            lines.append("```json")
++            lines.append(json.dumps(errs, indent=2, ensure_ascii=True))
++            lines.append("```")
+ 
+     return "\n".join(lines).strip() + "\n"
+ 
+diff --git a/src/gbdt_agent/training.py b/src/gbdt_agent/training.py
+index 415e08e..3df33d0 100644
+--- a/src/gbdt_agent/training.py
++++ b/src/gbdt_agent/training.py
+@@ -84,7 +84,8 @@ def train_models(
+     mcfg = models_cfg.get("gbdt", {}) or {}
+     framework = str(mcfg.get("framework", "lightgbm"))
+     params = mcfg.get("params", {}) or {}
+-    model = GBDTRegressor(seed=seed, framework=framework, params=params)
++    prefer_gpu = bool(mcfg.get("prefer_gpu", True))
++    model = GBDTRegressor(seed=seed, framework=framework, params=params, prefer_gpu=prefer_gpu)
+     model.fit(X_train, y_train, X_val, y_val)
+     yhat_val = model.predict(X_val)
+     val_mse = float(np.mean((yhat_val - y_val) ** 2))
+@@ -96,6 +97,14 @@ def train_models(
+         path = out_dir / "gbdt_model.pkl"
+     model.save(path)
+     ckpts["gbdt"] = str(path)
+-    info["gbdt"] = {"framework": model.framework, "params": params, "val_mse": val_mse}
++    info["gbdt"] = {
++        "framework": model.framework,
++        "prefer_gpu": prefer_gpu,
++        "gpu_attempted": bool(model.gpu_attempted),
++        "accelerator": model.train_accelerator,
++        "params": params,
++        "effective_params": model.trained_params or params,
++        "val_mse": val_mse,
++    }
+ 
+     return TrainResult(model_ckpt_paths=ckpts, training_info=info)
+diff --git a/src/gbdt_agent/transition.py b/src/gbdt_agent/transition.py
+index 26ca646..bfdc362 100644
+--- a/src/gbdt_agent/transition.py
++++ b/src/gbdt_agent/transition.py
+@@ -6,7 +6,7 @@ import json
+ import subprocess
+ from datetime import datetime, timezone
+ from pathlib import Path
+-from typing import Any, Dict
++from typing import Any, Dict, List
+ 
+ 
+ def _utc_ts() -> str:
+@@ -31,6 +31,14 @@ def _cmd(repo: Path, *args: str) -> str:
+         return f"(unavailable: {type(exc).__name__})"
+ 
+ 
++def _effective_errors(*, status: str, stage: str, errors: List[Any]) -> List[Any]:
++    # A resumed run can keep historical failures in metrics["errors"] even after
++    # a successful completion at stage_80. Hide those from the active error count.
++    if status == "success" and stage == "stage_80_report_ready":
++        return []
++    return errors
++
++
+ def generate_transition_report(*, project_dir: Path, run_id: str, target: str) -> Path:
+     project_dir = Path(project_dir)
+     run_dir = project_dir / "artifacts" / "runs" / run_id
+@@ -44,9 +52,14 @@ def generate_transition_report(*, project_dir: Path, run_id: str, target: str) -
+ 
+     stage = str((state or {}).get("stage", "unknown"))
+     status = str((metrics or {}).get("status", "unknown"))
+-    errors = (metrics or {}).get("errors") or []
++    errors_raw = (metrics or {}).get("errors") or []
++    historical_errors = (metrics or {}).get("historical_errors") or []
++    errors = _effective_errors(status=status, stage=stage, errors=errors_raw)
+     backtest = ((metrics or {}).get("backtest") or {}).get("summary") or {}
+     leakage = (metrics or {}).get("leakage") or {}
++    gbdt_train = (((metrics or {}).get("training_info") or {}).get("gbdt") or {}
++                  if isinstance((metrics or {}).get("training_info"), dict)
++                  else {})
+ 
+     git_status = _cmd(project_dir, "status", "--short")
+     git_commits = _cmd(project_dir, "log", "--oneline", "-n", "20")
+@@ -64,6 +77,8 @@ def generate_transition_report(*, project_dir: Path, run_id: str, target: str) -
+         "",
+         f"- leakage_passed: `{leakage.get('passed')}`",
+         f"- chosen_model: `{((metrics or {}).get('backtest') or {}).get('chosen_model')}`",
++        f"- train_accelerator: `{gbdt_train.get('accelerator')}`",
++        f"- gpu_attempted: `{gbdt_train.get('gpu_attempted')}`",
+         f"- sharpe: `{backtest.get('sharpe')}`",
+         f"- max_drawdown: `{backtest.get('max_drawdown')}`",
+         f"- total_return: `{backtest.get('total_return')}`",
+@@ -72,6 +87,11 @@ def generate_transition_report(*, project_dir: Path, run_id: str, target: str) -
+         "",
+         f"- error_count: `{len(errors)}`",
+     ]
++    hist_count = len(historical_errors) if isinstance(historical_errors, list) else 0
++    if hist_count == 0 and len(errors_raw) > len(errors):
++        hist_count = len(errors_raw)
++    if hist_count > 0:
++        lines.append(f"- historical_error_count: `{hist_count}`")
+     if errors:
+         lines += ["```json", json.dumps(errors, indent=2, ensure_ascii=True), "```", ""]
+ 
+diff --git a/tests/test_backtest.py b/tests/test_backtest.py
+index 9dc9226..180b843 100644
+--- a/tests/test_backtest.py
++++ b/tests/test_backtest.py
+@@ -3,6 +3,7 @@ from __future__ import annotations
+ import sys
+ from pathlib import Path
+ 
++import numpy as np
+ import pandas as pd
+ 
+ ROOT = Path(__file__).resolve().parents[1]
+@@ -74,3 +75,20 @@ def test_backtest_weekly_has_lower_or_equal_turnover_than_daily() -> None:
+         slippage_k_vol=0.0,
+     )
+     assert float(weekly.daily["turnover"].mean()) <= float(daily.daily["turnover"].mean()) + 1e-12
++
++
++def test_backtest_summary_metrics_are_finite_with_cost_inputs() -> None:
++    res = run_backtest(
++        _preds(),
++        topn=2,
++        long_short=False,
++        max_names=2,
++        single_name_cap=0.6,
++        rebalance="daily",
++        commission_bps=1.0,
++        slippage_base_bps=1.0,
++        slippage_k_adv=5.0,
++        slippage_k_vol=3.0,
++    )
++    for k in ["sharpe", "max_drawdown", "avg_turnover", "avg_cost", "total_return"]:
++        assert np.isfinite(float(res.summary[k]))
+diff --git a/tests/test_pipeline_synth.py b/tests/test_pipeline_synth.py
+index 911cd21..fa07a9b 100644
+--- a/tests/test_pipeline_synth.py
++++ b/tests/test_pipeline_synth.py
+@@ -215,3 +215,34 @@ def test_pipeline_fails_on_deliberate_leak(monkeypatch, tmp_path: Path) -> None:
+     assert ei.value.stage == "stage_40_split_leakcheck_failed"
+     state = json.loads((project_dir / "state" / "last_run_state.json").read_text())
+     assert state["stage"] == "stage_40_split_leakcheck_failed"
++
++
++def test_resume_archives_old_errors_in_metrics(monkeypatch, tmp_path: Path) -> None:
++    project_dir = tmp_path / "qp_proj_resume_errors"
++    project_dir.mkdir(parents=True, exist_ok=True)
++    conf = _make_conf(project_dir)
++    conf_path = project_dir / "conf.yaml"
++    conf_path.write_text(yaml.safe_dump(conf, sort_keys=False))
++    _install_fakes(monkeypatch, project_dir)
++
++    original_train_models = rexp.train_models
++    calls = {"n": 0}
++
++    def flaky_train_models(*args, **kwargs):
++        calls["n"] += 1
++        if calls["n"] == 1:
++            raise RuntimeError("synthetic training failure")
++        return original_train_models(*args, **kwargs)
++
++    monkeypatch.setattr(rexp, "train_models", flaky_train_models)
++
++    with pytest.raises(RuntimeError):
++        rexp.run_pipeline(project_dir=project_dir, conf_path=conf_path, resume=False, force_unlock=True)
++
++    run_id = json.loads((project_dir / "state" / "last_run_state.json").read_text())["run_id"]
++    rexp.run_pipeline(project_dir=project_dir, conf_path=conf_path, resume=True, force_unlock=True)
++
++    metrics = json.loads((project_dir / "artifacts" / "runs" / run_id / "metrics.json").read_text())
++    assert metrics["status"] == "success"
++    assert metrics.get("errors") == []
++    assert len(metrics.get("historical_errors") or []) >= 1

@@ -29,3 +29,6 @@ logs/
 
 # Runtime
 *.log
+
+# Generated reports
+reports/pre_colab_transition_*.md

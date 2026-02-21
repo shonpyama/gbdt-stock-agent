@@ -61,6 +61,7 @@ models:
   gbdt:
     enabled: true
     framework: "lightgbm"
+    prefer_gpu: true
     params:
       n_estimators: 300
       learning_rate: 0.05

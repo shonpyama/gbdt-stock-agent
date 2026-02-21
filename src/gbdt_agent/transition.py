@@ -6,7 +6,7 @@ import json
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 
 def _utc_ts() -> str:
@@ -31,6 +31,14 @@ def _cmd(repo: Path, *args: str) -> str:
         return f"(unavailable: {type(exc).__name__})"
 
 
+def _effective_errors(*, status: str, stage: str, errors: List[Any]) -> List[Any]:
+    # A resumed run can keep historical failures in metrics["errors"] even after
+    # a successful completion at stage_80. Hide those from the active error count.
+    if status == "success" and stage == "stage_80_report_ready":
+        return []
+    return errors
+
+
 def generate_transition_report(*, project_dir: Path, run_id: str, target: str) -> Path:
     project_dir = Path(project_dir)
     run_dir = project_dir / "artifacts" / "runs" / run_id
@@ -44,9 +52,14 @@ def generate_transition_report(*, project_dir: Path, run_id: str, target: str) -
 
     stage = str((state or {}).get("stage", "unknown"))
     status = str((metrics or {}).get("status", "unknown"))
-    errors = (metrics or {}).get("errors") or []
+    errors_raw = (metrics or {}).get("errors") or []
+    historical_errors = (metrics or {}).get("historical_errors") or []
+    errors = _effective_errors(status=status, stage=stage, errors=errors_raw)
     backtest = ((metrics or {}).get("backtest") or {}).get("summary") or {}
     leakage = (metrics or {}).get("leakage") or {}
+    gbdt_train = (((metrics or {}).get("training_info") or {}).get("gbdt") or {}
+                  if isinstance((metrics or {}).get("training_info"), dict)
+                  else {})
 
     git_status = _cmd(project_dir, "status", "--short")
     git_commits = _cmd(project_dir, "log", "--oneline", "-n", "20")
@@ -64,6 +77,8 @@ def generate_transition_report(*, project_dir: Path, run_id: str, target: str) -
         "",
         f"- leakage_passed: `{leakage.get('passed')}`",
         f"- chosen_model: `{((metrics or {}).get('backtest') or {}).get('chosen_model')}`",
+        f"- train_accelerator: `{gbdt_train.get('accelerator')}`",
+        f"- gpu_attempted: `{gbdt_train.get('gpu_attempted')}`",
         f"- sharpe: `{backtest.get('sharpe')}`",
         f"- max_drawdown: `{backtest.get('max_drawdown')}`",
         f"- total_return: `{backtest.get('total_return')}`",
@@ -72,6 +87,11 @@ def generate_transition_report(*, project_dir: Path, run_id: str, target: str) -
         "",
         f"- error_count: `{len(errors)}`",
     ]
+    hist_count = len(historical_errors) if isinstance(historical_errors, list) else 0
+    if hist_count == 0 and len(errors_raw) > len(errors):
+        hist_count = len(errors_raw)
+    if hist_count > 0:
+        lines.append(f"- historical_error_count: `{hist_count}`")
     if errors:
         lines += ["```json", json.dumps(errors, indent=2, ensure_ascii=True), "```", ""]
 

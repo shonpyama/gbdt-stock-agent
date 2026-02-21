@@ -54,11 +54,13 @@ def render_report_md(
     split_info: Optional[Dict[str, Any]],
     validation: Optional[Dict[str, Any]],
     leakage: Optional[Dict[str, Any]],
+    training_info: Optional[Dict[str, Any]],
     model_metrics: Optional[Dict[str, Any]],
     chosen_model: Optional[str],
     backtest_summary: Optional[Dict[str, Any]],
     status: str,
     errors: Optional[Any],
+    historical_errors: Optional[Any] = None,
 ) -> str:
     run = cfg.get("run", {}) or {}
     data = cfg.get("data", {}) or {}
@@ -156,6 +158,17 @@ def render_report_md(
         lines.append("- (no model metrics recorded)")
         lines.append("")
 
+    lines.append("## Training Runtime")
+    lines.append("")
+    gbdt_train = (training_info or {}).get("gbdt") if isinstance(training_info, dict) else None
+    if isinstance(gbdt_train, dict):
+        for k in ["framework", "accelerator", "gpu_attempted", "prefer_gpu", "val_mse"]:
+            if k in gbdt_train:
+                lines.append(f"- {k}: `{gbdt_train.get(k)}`")
+    else:
+        lines.append("- (no training runtime recorded)")
+    lines.append("")
+
     lines.append("## Backtest")
     lines.append("")
 
@@ -188,12 +201,21 @@ def render_report_md(
     lines.append("```")
     lines.append("")
 
-    if errors:
+    errs = errors if isinstance(errors, list) else []
+    hist_errs = historical_errors if isinstance(historical_errors, list) else []
+    if status.upper() == "SUCCESS" and errs and not hist_errs:
+        # Backward compatibility for older metrics that stored only `errors`.
+        hist_errs = list(errs)
+        errs = []
+    if errs or hist_errs:
         lines.append("## Errors")
         lines.append("")
-        lines.append("```")
-        lines.append(json.dumps(errors, indent=2, ensure_ascii=True) if not isinstance(errors, str) else errors)
-        lines.append("```")
+        lines.append(f"- active_error_count: `{len(errs)}`")
+        lines.append(f"- historical_error_count: `{len(hist_errs)}`")
+        if errs:
+            lines.append("```json")
+            lines.append(json.dumps(errs, indent=2, ensure_ascii=True))
+            lines.append("```")
 
     return "\n".join(lines).strip() + "\n"
 
