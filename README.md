@@ -59,6 +59,8 @@ cat outputs/reports/latest_run_manifest.json
 ./auto_improve_loop.sh AAPL,MSFT,NVDA,AMZN,META
 # 現在状態(差分・ログ・最新成果物)をDrive上にチェックポイント保存
 ./save_workspace_checkpoint.sh manual
+# dirtyワークツリーでもコミット1件を安全にpush
+./push_commit_safely.sh origin main HEAD
 ```
 
 **保存先**: `./outputs/csv/`, `./outputs/reports/`

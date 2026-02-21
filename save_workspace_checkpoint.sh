@@ -41,7 +41,14 @@ if ls outputs/logs/*.log >/dev/null 2>&1; then
   done
 fi
 
+set +e
 tar --warning=no-file-changed -czf "${OUT_DIR}.tar.gz" -C "$(dirname "$OUT_DIR")" "$(basename "$OUT_DIR")"
+TAR_RC=$?
+set -e
+if [[ "$TAR_RC" -gt 1 ]]; then
+  echo "ERROR: tar failed with rc=${TAR_RC}" >&2
+  exit "$TAR_RC"
+fi
 ln -sfn "$(basename "$OUT_DIR")" outputs/checkpoints/latest
 
 echo "Checkpoint saved: $OUT_DIR"
