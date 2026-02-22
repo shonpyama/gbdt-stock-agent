@@ -50,9 +50,9 @@ python -m gbdt_agent.cli run --conf conf/default.yaml --resume
 - モデル安定性検証（本番3期間）: `python scripts/model_stability_prod.py --base-conf conf/default.yaml --promote-default`
 - 特徴量安定性検証（本番3期間）: `python scripts/feature_stability_prod.py --base-conf conf/default.yaml --promote-default`
 - 候補分割で並列実行（multi-agent）する場合:
-  - 例1: `python scripts/model_stability_prod.py --only-candidates baseline_auto`
-  - 例2: `python scripts/model_stability_prod.py --only-candidates compact_31`
-  - 例3: `python scripts/feature_stability_prod.py --only-candidates baseline_current`
+  - 例1: `python scripts/model_stability_prod.py --only-candidates baseline_auto --out-json reports/model_stability_agent1.json --out-md reports/model_stability_agent1.md`
+  - 例2: `python scripts/model_stability_prod.py --only-candidates compact_31 --out-json reports/model_stability_agent2.json --out-md reports/model_stability_agent2.md`
+  - 例3: `python scripts/feature_stability_prod.py --only-candidates baseline_current --out-json reports/feature_stability_agent1.json --out-md reports/feature_stability_agent1.md`
 - 安定性検証込み一括運用:
   - `RUN_MODEL_STABILITY=1 RUN_FEATURE_STABILITY=1 scripts/ops_autopilot.sh`
 - 運用ゲート（品質/鮮度の合否判定）: `python -m gbdt_agent.cli ops-gate --policy conf/ops_policy.yaml`

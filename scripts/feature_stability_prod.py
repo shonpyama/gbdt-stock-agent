@@ -76,6 +76,8 @@ def main() -> int:
         default="",
         help="Comma-separated candidate names to run (default: all).",
     )
+    parser.add_argument("--out-json", default="", help="Optional output JSON path.")
+    parser.add_argument("--out-md", default="", help="Optional output Markdown path.")
     parser.add_argument(
         "--promote-default",
         action="store_true",
@@ -211,8 +213,14 @@ def main() -> int:
         "summary": ranked_summary,
         "selected": selected,
     }
-    out_json = out_dir / "feature_stability_prod_results.json"
-    out_md = out_dir / f"feature_stability_prod_{datetime.now(timezone.utc).strftime('%Y%m%d')}.md"
+    out_json = Path(args.out_json) if args.out_json else (out_dir / "feature_stability_prod_results.json")
+    out_md = Path(args.out_md) if args.out_md else (out_dir / f"feature_stability_prod_{datetime.now(timezone.utc).strftime('%Y%m%d')}.md")
+    if not out_json.is_absolute():
+        out_json = project_dir / out_json
+    if not out_md.is_absolute():
+        out_md = project_dir / out_md
+    out_json.parent.mkdir(parents=True, exist_ok=True)
+    out_md.parent.mkdir(parents=True, exist_ok=True)
     out_json.write_text(json.dumps(payload, indent=2, ensure_ascii=True))
 
     lines = [
