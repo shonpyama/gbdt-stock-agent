@@ -31,14 +31,17 @@ def _score(metrics: Dict[str, Any]) -> float:
     back = ((metrics.get("backtest") or {}).get("summary") or {})
     sharpe = _safe_float(back.get("sharpe"))
     total_ret = _safe_float(back.get("total_return"))
+    max_dd = _safe_float(back.get("max_drawdown"))
     if rank_ic != rank_ic:
         rank_ic = -1.0
     if sharpe != sharpe:
         sharpe = -10.0
     if total_ret != total_ret:
         total_ret = -10.0
-    # prioritize predictive quality, then tradability.
-    return (rank_ic * 100.0) + (sharpe * 0.2) + (total_ret * 0.001)
+    if max_dd != max_dd:
+        max_dd = -1.0
+    # Rank quality first, then risk-adjusted performance.
+    return (rank_ic * 100.0) + (sharpe * 0.5) + (total_ret * 10.0) + (max_dd * 2.0)
 
 
 def main() -> int:
@@ -48,12 +51,55 @@ def main() -> int:
     base_cfg = yaml.safe_load(base_conf_path.read_text())
 
     candidates: List[Dict[str, Any]] = [
-        {"name": "lb_1_3_5_10_20_60", "lookbacks": [1, 3, 5, 10, 20, 60], "event_shift": 1},
-        {"name": "lb_1_2_5_10_20_40_60", "lookbacks": [1, 2, 5, 10, 20, 40, 60], "event_shift": 1},
-        {"name": "lb_1_5_10_20_40_80", "lookbacks": [1, 5, 10, 20, 40, 80], "event_shift": 1},
-        {"name": "lb_1_5_20_60_120", "lookbacks": [1, 5, 20, 60, 120], "event_shift": 1},
-        {"name": "lb_1_5_20_60_shift2", "lookbacks": [1, 5, 20, 60], "event_shift": 2},
-        {"name": "lb_1_5_20_60_120_shift2", "lookbacks": [1, 5, 20, 60, 120], "event_shift": 2},
+        {
+            "name": "baseline_smoke_local",
+            "params": {
+                "n_estimators": 300,
+                "learning_rate": 0.05,
+                "num_leaves": 31,
+            },
+        },
+        {
+            "name": "prod_default_auto",
+            "params": {},
+        },
+        {
+            "name": "l2_regularized_63",
+            "params": {
+                "n_estimators": 3500,
+                "learning_rate": 0.03,
+                "num_leaves": 63,
+                "subsample": 0.9,
+                "colsample_bytree": 0.8,
+                "min_child_samples": 80,
+                "reg_lambda": 2.0,
+                "reg_alpha": 0.2,
+            },
+        },
+        {
+            "name": "low_lr_95",
+            "params": {
+                "n_estimators": 5000,
+                "learning_rate": 0.02,
+                "num_leaves": 95,
+                "subsample": 0.9,
+                "colsample_bytree": 0.7,
+                "min_child_samples": 70,
+                "reg_lambda": 1.0,
+            },
+        },
+        {
+            "name": "higher_leaf_127",
+            "params": {
+                "n_estimators": 2500,
+                "learning_rate": 0.04,
+                "num_leaves": 127,
+                "subsample": 0.8,
+                "colsample_bytree": 0.8,
+                "min_child_samples": 100,
+                "reg_lambda": 1.0,
+            },
+        },
     ]
 
     out_dir = project_dir / "reports"
@@ -64,16 +110,14 @@ def main() -> int:
     results: List[Dict[str, Any]] = []
     for idx, c in enumerate(candidates, start=1):
         cfg = deepcopy(base_cfg)
-        cfg["features"]["lookbacks"] = list(c["lookbacks"])
-        cfg["features"]["event_safe_shift_days"] = int(c["event_shift"])
-        conf_path = conf_dir / f"smoke_feature_{idx:02d}_{c['name']}.yaml"
+        cfg.setdefault("models", {}).setdefault("gbdt", {})["params"] = dict(c["params"])
+        conf_path = conf_dir / f"smoke_model_{idx:02d}_{c['name']}.yaml"
         conf_path.write_text(yaml.safe_dump(cfg, sort_keys=False))
 
         item: Dict[str, Any] = {
             "name": c["name"],
             "conf_path": str(conf_path),
-            "lookbacks": c["lookbacks"],
-            "event_shift": c["event_shift"],
+            "params": dict(c["params"]),
             "ok": False,
         }
         try:
@@ -102,25 +146,35 @@ def main() -> int:
 
     ranked = sorted(results, key=lambda x: float(x.get("score", -1e9)), reverse=True)
     payload = {"base_conf": str(base_conf_path), "ranked": ranked}
-    out_json = out_dir / "feature_search_smoke_results.json"
-    out_md = out_dir / "feature_search_smoke_results.md"
+    out_json = out_dir / "model_search_smoke_results.json"
+    out_md = out_dir / "model_search_smoke_results.md"
     out_json.write_text(json.dumps(payload, indent=2, ensure_ascii=True))
 
     lines = [
-        "# Feature Search (Smoke)",
+        "# Model Search (Smoke)",
         "",
         f"- base_conf: `{base_conf_path}`",
         f"- trials: `{len(results)}`",
         "",
-        "| rank | name | score | rank_ic_test_mean | sharpe | total_return | run_id |",
-        "|---:|---|---:|---:|---:|---:|---|",
+        "| rank | name | score | rank_ic_test_mean | sharpe | total_return | max_drawdown | run_id |",
+        "|---:|---|---:|---:|---:|---:|---:|---|",
     ]
     for i, r in enumerate(ranked, start=1):
         lines.append(
-            f"| {i} | {r.get('name')} | {r.get('score')} | {r.get('rank_ic_test_mean')} | {r.get('sharpe')} | {r.get('total_return')} | {r.get('run_id','-')} |"
+            f"| {i} | {r.get('name')} | {r.get('score')} | {r.get('rank_ic_test_mean')} | {r.get('sharpe')} | {r.get('total_return')} | {r.get('max_drawdown')} | {r.get('run_id','-')} |"
         )
     out_md.write_text("\n".join(lines) + "\n")
-    print(json.dumps({"results_json": str(out_json), "results_md": str(out_md), "top": ranked[:2]}, indent=2, ensure_ascii=True))
+    print(
+        json.dumps(
+            {
+                "results_json": str(out_json),
+                "results_md": str(out_md),
+                "top": ranked[:3],
+            },
+            indent=2,
+            ensure_ascii=True,
+        )
+    )
     return 0
 
 

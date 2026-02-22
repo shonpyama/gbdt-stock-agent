@@ -91,7 +91,13 @@ models:
     enabled: true
     framework: "lightgbm"
     prefer_gpu: true
-    params: {}
+    params:
+      n_estimators: 1500
+      learning_rate: 0.05
+      num_leaves: 31
+      subsample: 0.9
+      colsample_bytree: 0.8
+      min_child_samples: 20
 
 backtest:
   long_short: false
