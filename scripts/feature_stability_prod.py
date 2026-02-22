@@ -48,27 +48,10 @@ def _score(metrics: Dict[str, Any]) -> float:
 
 
 def _parse_end_dates() -> List[str]:
-    raw = str(os.environ.get("MODEL_STABILITY_END_DATES", "")).strip()
+    raw = str(os.environ.get("FEATURE_STABILITY_END_DATES", "")).strip()
     if raw:
         return [x.strip() for x in raw.split(",") if x.strip()]
     return ["2025-12-31", "2026-01-31", "2026-02-21"]
-
-
-def _candidate_map() -> List[Dict[str, Any]]:
-    return [
-        {"name": "baseline_auto", "params": {}},
-        {
-            "name": "compact_31",
-            "params": {
-                "n_estimators": 1500,
-                "learning_rate": 0.05,
-                "num_leaves": 31,
-                "subsample": 0.9,
-                "colsample_bytree": 0.8,
-                "min_child_samples": 20,
-            },
-        },
-    ]
 
 
 def _mean(xs: List[float]) -> float:
@@ -86,16 +69,12 @@ def _resolve_conf_path(base: str) -> Path:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run multi-period stability validation for production model selection.")
-    parser.add_argument(
-        "--base-conf",
-        default="conf/default.yaml",
-        help="Base config path used as a template.",
-    )
+    parser = argparse.ArgumentParser(description="Run multi-period feature stability validation for production.")
+    parser.add_argument("--base-conf", default="conf/default.yaml", help="Base config path used as a template.")
     parser.add_argument(
         "--promote-default",
         action="store_true",
-        help="Apply selected model params to base config after ranking.",
+        help="Apply selected feature params to base config after ranking.",
     )
     args = parser.parse_args()
 
@@ -109,9 +88,16 @@ def main() -> int:
     max_age_hours = float(policy.get("max_age_hours", 72.0))
     require_gpu = bool(policy.get("require_gpu", False))
 
-    end_dates = _parse_end_dates()
-    candidates = _candidate_map()
+    current_features = (base_cfg.get("features") or {})
+    current_lookbacks = list(current_features.get("lookbacks") or [1, 3, 5, 10, 20, 60, 120])
+    current_shift = int(current_features.get("event_safe_shift_days", 1))
+    candidates: List[Dict[str, Any]] = [
+        {"name": "baseline_current", "lookbacks": current_lookbacks, "event_shift": current_shift},
+        {"name": "lb_1_5_20_60_120", "lookbacks": [1, 5, 20, 60, 120], "event_shift": 1},
+        {"name": "lb_1_5_20_60_120_shift2", "lookbacks": [1, 5, 20, 60, 120], "event_shift": 2},
+    ]
 
+    end_dates = _parse_end_dates()
     out_dir = project_dir / "reports"
     out_dir.mkdir(parents=True, exist_ok=True)
     conf_dir = project_dir / "conf" / "experiments"
@@ -122,17 +108,19 @@ def main() -> int:
         for c in candidates:
             cfg = deepcopy(base_cfg)
             cfg.setdefault("data", {})["end_date"] = end_date
-            cfg.setdefault("models", {}).setdefault("gbdt", {})["params"] = dict(c["params"])
+            cfg.setdefault("features", {})["lookbacks"] = list(c["lookbacks"])
+            cfg.setdefault("features", {})["event_safe_shift_days"] = int(c["event_shift"])
             cfg.setdefault("run", {})["log_level"] = "WARNING"
 
             end_tag = end_date.replace("-", "")
-            conf_path = conf_dir / f"stability_model_{end_tag}_{c['name']}.yaml"
+            conf_path = conf_dir / f"stability_feature_{end_tag}_{c['name']}.yaml"
             conf_path.write_text(yaml.safe_dump(cfg, sort_keys=False))
 
             item: Dict[str, Any] = {
                 "end_date": end_date,
                 "name": c["name"],
-                "params": dict(c["params"]),
+                "lookbacks": list(c["lookbacks"]),
+                "event_shift": int(c["event_shift"]),
                 "conf_path": str(conf_path),
                 "ok": False,
             }
@@ -155,7 +143,6 @@ def main() -> int:
 
                 mm = ((metrics.get("model_metrics") or {}).get("gbdt") or {}).get("test") or {}
                 bt = ((metrics.get("backtest") or {}).get("summary") or {})
-
                 item["run_id"] = run_id
                 item["ok"] = bool(metrics.get("status") == "success")
                 item["status"] = metrics.get("status")
@@ -179,7 +166,8 @@ def main() -> int:
         summary.append(
             {
                 "name": c["name"],
-                "params": dict(c["params"]),
+                "lookbacks": list(c["lookbacks"]),
+                "event_shift": int(c["event_shift"]),
                 "periods": len(rows),
                 "gate_pass_periods": sum(1 for r in rows if bool(r.get("ops_gate_ok"))),
                 "all_periods_gate_pass": all(bool(r.get("ops_gate_ok")) for r in rows) and len(rows) == len(end_dates),
@@ -212,12 +200,12 @@ def main() -> int:
         "summary": ranked_summary,
         "selected": selected,
     }
-    out_json = out_dir / "model_stability_prod_results.json"
-    out_md = out_dir / f"model_stability_prod_{datetime.now(timezone.utc).strftime('%Y%m%d')}.md"
+    out_json = out_dir / "feature_stability_prod_results.json"
+    out_md = out_dir / f"feature_stability_prod_{datetime.now(timezone.utc).strftime('%Y%m%d')}.md"
     out_json.write_text(json.dumps(payload, indent=2, ensure_ascii=True))
 
     lines = [
-        f"# Model Stability (Production) - {datetime.now(timezone.utc).strftime('%Y-%m-%d')}",
+        f"# Feature Stability (Production) - {datetime.now(timezone.utc).strftime('%Y-%m-%d')}",
         "",
         f"- base_conf: `{base_conf_path}`",
         f"- policy: `{policy_path}`",
@@ -225,7 +213,7 @@ def main() -> int:
         "",
         "## Per-Period",
         "",
-        "| end_date | model | score | rank_ic_test_mean | sharpe | total_return | max_drawdown | ops_gate | run_id |",
+        "| end_date | feature_set | score | rank_ic_test_mean | sharpe | total_return | max_drawdown | ops_gate | run_id |",
         "|---|---|---:|---:|---:|---:|---:|---|---|",
     ]
     for r in sorted(results, key=lambda x: (str(x.get("end_date")), str(x.get("name")))):
@@ -238,7 +226,7 @@ def main() -> int:
         "",
         "## Aggregate",
         "",
-        "| rank | model | all_periods_gate_pass | score_mean | score_min | rank_ic_mean | sharpe_mean | total_return_mean | max_drawdown_mean |",
+        "| rank | feature_set | all_periods_gate_pass | score_mean | score_min | rank_ic_mean | sharpe_mean | total_return_mean | max_drawdown_mean |",
         "|---:|---|---|---:|---:|---:|---:|---:|---:|",
     ]
     for idx, s in enumerate(ranked_summary, start=1):
@@ -252,7 +240,8 @@ def main() -> int:
             "## Selected",
             "",
             f"- name: `{selected.get('name')}`",
-            f"- params: `{json.dumps(selected.get('params', {}), ensure_ascii=True)}`",
+            f"- lookbacks: `{json.dumps(selected.get('lookbacks', []), ensure_ascii=True)}`",
+            f"- event_shift: `{selected.get('event_shift')}`",
             f"- all_periods_gate_pass: `{selected.get('all_periods_gate_pass')}`",
             f"- score_mean: `{selected.get('score_mean')}`",
             f"- score_min: `{selected.get('score_min')}`",
@@ -262,7 +251,8 @@ def main() -> int:
     promoted = False
     if args.promote_default and selected:
         promoted_cfg = yaml.safe_load(base_conf_path.read_text())
-        promoted_cfg.setdefault("models", {}).setdefault("gbdt", {})["params"] = dict(selected.get("params") or {})
+        promoted_cfg.setdefault("features", {})["lookbacks"] = list(selected.get("lookbacks") or [])
+        promoted_cfg.setdefault("features", {})["event_safe_shift_days"] = int(selected.get("event_shift") or 1)
         base_conf_path.write_text(yaml.safe_dump(promoted_cfg, sort_keys=False))
         promoted = True
 

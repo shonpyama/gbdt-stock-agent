@@ -8,8 +8,18 @@ CONF_PATH="${CONF_PATH:-conf/default.yaml}"
 DRIVE_PATH="${DRIVE_PATH:-/content/drive/MyDrive/gbdt-stock-agent}"
 MAX_AGE_HOURS="${MAX_AGE_HOURS:-72}"
 OPS_POLICY="${OPS_POLICY:-conf/ops_policy.yaml}"
+RUN_MODEL_STABILITY="${RUN_MODEL_STABILITY:-0}"
+RUN_FEATURE_STABILITY="${RUN_FEATURE_STABILITY:-0}"
 
 export PYTHONPATH="${ROOT_DIR}/src:${PYTHONPATH:-}"
+
+if [[ "${RUN_MODEL_STABILITY}" == "1" ]]; then
+  python scripts/model_stability_prod.py --base-conf "${CONF_PATH}" --promote-default
+fi
+
+if [[ "${RUN_FEATURE_STABILITY}" == "1" ]]; then
+  python scripts/feature_stability_prod.py --base-conf "${CONF_PATH}" --promote-default
+fi
 
 python -m gbdt_agent.cli preflight --conf "${CONF_PATH}"
 python -m gbdt_agent.cli run --conf "${CONF_PATH}" --resume
@@ -31,5 +41,5 @@ if [[ "${GATE_RC}" -ne 0 ]]; then
   FINAL_RC="${GATE_RC}"
 fi
 
-echo "ops_autopilot_done run_id=${RUN_ID} snapshot_rc=${SNAPSHOT_RC} gate_rc=${GATE_RC}"
+echo "ops_autopilot_done run_id=${RUN_ID} snapshot_rc=${SNAPSHOT_RC} gate_rc=${GATE_RC} model_stability=${RUN_MODEL_STABILITY} feature_stability=${RUN_FEATURE_STABILITY}"
 exit "${FINAL_RC}"
