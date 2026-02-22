@@ -175,6 +175,29 @@ def test_pipeline_runs_end_to_end_with_resume(monkeypatch, tmp_path: Path) -> No
     assert state["stage"] == "stage_80_report_ready"
 
 
+def test_pipeline_applies_feature_exclude_filters(monkeypatch, tmp_path: Path) -> None:
+    project_dir = tmp_path / "qp_proj_feature_filter"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    conf = _make_conf(project_dir)
+    conf.setdefault("features", {})["exclude_regex"] = ["^ret_"]
+    conf_path = project_dir / "conf.yaml"
+    conf_path.write_text(yaml.safe_dump(conf, sort_keys=False))
+    _install_fakes(monkeypatch, project_dir)
+
+    run_id = rexp.run_pipeline(
+        project_dir=project_dir,
+        conf_path=conf_path,
+        resume=False,
+        force_unlock=True,
+    )
+    metrics = json.loads((project_dir / "artifacts" / "runs" / run_id / "metrics.json").read_text())
+    feature_cols = ((metrics.get("training_info") or {}).get("feature_cols")) or []
+    assert feature_cols
+    assert all(not str(c).startswith("ret_") for c in feature_cols)
+    sel = metrics.get("feature_selection") or {}
+    assert int(sel.get("before_count", 0)) > int(sel.get("after_count", 0))
+
+
 def test_pipeline_fails_on_deliberate_leak(monkeypatch, tmp_path: Path) -> None:
     project_dir = tmp_path / "qp_proj_leak"
     project_dir.mkdir(parents=True, exist_ok=True)
@@ -192,6 +215,7 @@ def test_pipeline_fails_on_deliberate_leak(monkeypatch, tmp_path: Path) -> None:
         adjusted_flag,
         lookbacks,
         event_safe_shift_days,
+        news_general_symbol_uses_tickers=False,
         out_dir,
     ):
         px = prices.copy()

@@ -54,6 +54,7 @@ _NEWS_NEGATIVE_TOKENS = {
 _NEWS_TOKEN_RE = re.compile(r"[a-z']+")
 _NEWS_TICKER_SPLIT_RE = re.compile(r"[,;\s|]+")
 _NEWS_TICKER_RE = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,9}$")
+_NEWS_SYMBOL_PLACEHOLDERS = {"GENERAL", "MARKET", "ALL", "GLOBAL"}
 
 
 def _sha1(text: str) -> str:
@@ -197,7 +198,7 @@ def _simple_lexicon_sentiment(text: str) -> float:
     return float((pos - neg) / max(1, len(toks)))
 
 
-def _extract_news_symbols(value: Any) -> List[str]:
+def _extract_news_symbols(value: Any, *, drop_placeholders: bool = False) -> List[str]:
     raw = str(value).upper().strip() if value is not None else ""
     if not raw or raw in {"NAN", "NONE"}:
         return []
@@ -210,7 +211,7 @@ def _extract_news_symbols(value: Any) -> List[str]:
             continue
         if ":" in token:
             token = token.split(":")[-1].strip()
-        if not token or not _NEWS_TICKER_RE.match(token):
+        if not token or (drop_placeholders and token in _NEWS_SYMBOL_PLACEHOLDERS) or not _NEWS_TICKER_RE.match(token):
             continue
         if token in seen:
             continue
@@ -230,6 +231,7 @@ def _prepare_news_features(
     news: pd.DataFrame,
     *,
     event_safe_shift_days: int,
+    general_symbol_uses_tickers: bool = False,
 ) -> pd.DataFrame:
     cols = [
         "decision_date",
@@ -292,16 +294,18 @@ def _prepare_news_features(
     # symbol -> tickers -> ticker -> GENERAL.
     symbol_lists = pd.Series([[] for _ in range(len(df))], index=df.index, dtype=object)
     if "symbol" in df.columns:
-        symbol_lists = df["symbol"].map(_extract_news_symbols)
+        symbol_lists = df["symbol"].map(
+            lambda v: _extract_news_symbols(v, drop_placeholders=bool(general_symbol_uses_tickers))
+        )
     if "tickers" in df.columns:
-        tickers_lists = df["tickers"].map(_extract_news_symbols)
+        tickers_lists = df["tickers"].map(lambda v: _extract_news_symbols(v, drop_placeholders=True))
         symbol_lists = pd.Series(
             [s if len(s) > 0 else t for s, t in zip(symbol_lists.tolist(), tickers_lists.tolist())],
             index=df.index,
             dtype=object,
         )
     if "ticker" in df.columns:
-        ticker_lists = df["ticker"].map(_extract_news_symbols)
+        ticker_lists = df["ticker"].map(lambda v: _extract_news_symbols(v, drop_placeholders=True))
         symbol_lists = pd.Series(
             [s if len(s) > 0 else t for s, t in zip(symbol_lists.tolist(), ticker_lists.tolist())],
             index=df.index,
@@ -349,6 +353,7 @@ def build_feature_store(
     adjusted_flag: bool,
     lookbacks: Sequence[int],
     event_safe_shift_days: int,
+    news_general_symbol_uses_tickers: bool = False,
     out_dir: Path,
 ) -> FeatureBuildResult:
     price_feats = build_price_features(prices, adjusted_flag=adjusted_flag, lookbacks=lookbacks)
@@ -376,7 +381,11 @@ def build_feature_store(
         feats["eps_surprise"] = pd.to_numeric(feats["eps_surprise"], errors="coerce").fillna(0.0)
 
     if news is not None:
-        n_feats = _prepare_news_features(news, event_safe_shift_days=event_safe_shift_days)
+        n_feats = _prepare_news_features(
+            news,
+            event_safe_shift_days=event_safe_shift_days,
+            general_symbol_uses_tickers=bool(news_general_symbol_uses_tickers),
+        )
         if not n_feats.empty:
             sym_cols = [
                 "news_count_1d",

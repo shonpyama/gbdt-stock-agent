@@ -172,6 +172,83 @@ def test_build_feature_store_market_news_applies_to_all_symbols_same_day(tmp_pat
     assert bool((day["news_count_1d"] == 0.0).all())
 
 
+def test_build_feature_store_general_symbol_falls_back_to_tickers(tmp_path: Path) -> None:
+    symbols = ["AAA", "BBB"]
+    dates = list(pd.bdate_range("2024-01-01", "2024-06-30").date)
+    prices = _make_prices(symbols, dates)
+    membership = _make_membership(symbols, dates)
+    earnings = pd.DataFrame(columns=["symbol", "date"])
+
+    news = pd.DataFrame(
+        [
+            {
+                "date": str(dates[30]),
+                "symbol": "GENERAL",
+                "tickers": "NASDAQ:BBB",
+                "title": "BBB upgrade",
+                "content": "analyst upgrade",
+                "site": "wire",
+            }
+        ]
+    )
+
+    res = build_feature_store(
+        dataset_id="ds_general_symbol_tickers_fallback",
+        prices=prices,
+        universe_membership=membership,
+        earnings=earnings,
+        news=news,
+        adjusted_flag=True,
+        lookbacks=[1, 5, 20, 60],
+        event_safe_shift_days=1,
+        news_general_symbol_uses_tickers=True,
+        out_dir=tmp_path / "feature_store",
+    )
+
+    bbb = res.features[res.features["symbol"] == "BBB"]
+    aaa = res.features[res.features["symbol"] == "AAA"]
+    assert bool((bbb["news_count_20d"] > 0.0).any())
+    assert not bool((aaa["news_count_20d"] > 0.0).any())
+
+
+def test_build_feature_store_general_symbol_keeps_market_only_by_default(tmp_path: Path) -> None:
+    symbols = ["AAA", "BBB"]
+    dates = list(pd.bdate_range("2024-01-01", "2024-06-30").date)
+    prices = _make_prices(symbols, dates)
+    membership = _make_membership(symbols, dates)
+    earnings = pd.DataFrame(columns=["symbol", "date"])
+
+    news = pd.DataFrame(
+        [
+            {
+                "date": str(dates[30]),
+                "symbol": "GENERAL",
+                "tickers": "NASDAQ:BBB",
+                "title": "BBB upgrade",
+                "content": "analyst upgrade",
+                "site": "wire",
+            }
+        ]
+    )
+
+    res = build_feature_store(
+        dataset_id="ds_general_symbol_default",
+        prices=prices,
+        universe_membership=membership,
+        earnings=earnings,
+        news=news,
+        adjusted_flag=True,
+        lookbacks=[1, 5, 20, 60],
+        event_safe_shift_days=1,
+        out_dir=tmp_path / "feature_store",
+    )
+
+    day = res.features[res.features["decision_date"] == dates[31]]
+    assert len(day) == len(symbols)
+    assert bool((day["mkt_news_count_1d"] > 0.0).all())
+    assert bool((day["news_count_1d"] == 0.0).all())
+
+
 def test_build_feature_store_news_dates_coalesce_published_date_and_date(tmp_path: Path) -> None:
     symbols = ["AAA", "BBB"]
     dates = list(pd.bdate_range("2024-01-01", "2024-06-30").date)

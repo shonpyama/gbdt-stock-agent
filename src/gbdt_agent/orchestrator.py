@@ -5,6 +5,7 @@ import inspect
 import json
 import logging
 import os
+import re
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
@@ -483,6 +484,7 @@ def run_pipeline(
                 adjusted_flag=bool((cfg.get("data") or {}).get("adjusted_flag", True)),
                 lookbacks=list(fcfg.get("lookbacks", [1, 5, 20, 60])),
                 event_safe_shift_days=int(fcfg.get("event_safe_shift_days", 1)),
+                news_general_symbol_uses_tickers=bool(fcfg.get("news_general_symbol_uses_tickers", False)),
                 out_dir=paths.feature_store_dir,
             )
             if "news" in inspect.signature(build_feature_store).parameters:
@@ -599,6 +601,35 @@ def run_pipeline(
                 "feature_version",
             }
         ]
+        fcfg = cfg.get("features") or {}
+        exclude_prefixes = [str(x) for x in (fcfg.get("exclude_prefixes") or []) if str(x)]
+        exclude_regex = [str(x) for x in (fcfg.get("exclude_regex") or []) if str(x)]
+        regexes = []
+        for patt in exclude_regex:
+            try:
+                regexes.append(re.compile(patt))
+            except re.error as exc:
+                raise ValueError(f"Invalid features.exclude_regex pattern: {patt}") from exc
+
+        if exclude_prefixes or regexes:
+            before = list(feature_cols)
+
+            def _keep_feature(name: str) -> bool:
+                if exclude_prefixes and any(name.startswith(pfx) for pfx in exclude_prefixes):
+                    return False
+                if regexes and any(rx.search(name) for rx in regexes):
+                    return False
+                return True
+
+            feature_cols = [c for c in before if _keep_feature(c)]
+            metrics["feature_selection"] = {
+                "exclude_prefixes": exclude_prefixes,
+                "exclude_regex": exclude_regex,
+                "before_count": int(len(before)),
+                "after_count": int(len(feature_cols)),
+            }
+        if not feature_cols:
+            raise RuntimeError("No features selected after applying features.exclude_* filters")
 
         # Stage 50
         if _should_run("stage_50_models_trained"):
