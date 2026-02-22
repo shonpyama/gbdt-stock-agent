@@ -3,10 +3,11 @@ from __future__ import annotations
 import json
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import pandas as pd
 from pandas.tseries.offsets import BDay
@@ -340,6 +341,50 @@ def _read_parquet(path: Path) -> pd.DataFrame:
     return pd.read_parquet(path)
 
 
+def _resolve_fetch_workers(cfg: Dict[str, Any]) -> int:
+    dcfg = cfg.get("data", {}) if isinstance(cfg.get("data"), dict) else {}
+    raw = dcfg.get("fetch_workers", 1) if isinstance(dcfg, dict) else 1
+    try:
+        workers = int(raw)
+    except Exception:
+        workers = 1
+    return max(1, workers)
+
+
+def _parallel_symbol_fetch(
+    symbols: Sequence[str],
+    *,
+    desc: str,
+    max_workers: int,
+    fetch_one: Callable[[str], Any],
+) -> List[Tuple[str, Any, Optional[BaseException]]]:
+    symbols_list = list(symbols)
+    if not symbols_list:
+        return []
+
+    results: List[Optional[Tuple[str, Any, Optional[BaseException]]]] = [None] * len(symbols_list)
+    if max_workers <= 1 or len(symbols_list) <= 1:
+        for i, sym in enumerate(tqdm(symbols_list, desc=desc)):
+            try:
+                results[i] = (sym, fetch_one(sym), None)
+            except Exception as exc:  # pragma: no cover - depends on remote behavior
+                results[i] = (sym, None, exc)
+        return [x for x in results if x is not None]
+
+    with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix=f"{desc}_w") as pool:
+        futures = {pool.submit(fetch_one, sym): i for i, sym in enumerate(symbols_list)}
+        for fut in tqdm(as_completed(futures), total=len(futures), desc=desc):
+            i = futures[fut]
+            sym = symbols_list[i]
+            try:
+                payload = fut.result()
+                results[i] = (sym, payload, None)
+            except Exception as exc:  # pragma: no cover - depends on remote behavior
+                results[i] = (sym, None, exc)
+
+    return [x for x in results if x is not None]
+
+
 def compute_dataset_id(
     cfg: Dict[str, Any],
     symbols: Sequence[str],
@@ -349,6 +394,8 @@ def compute_dataset_id(
     dcfg = cfg.get("data", {}) or {}
     ucfg = cfg.get("universe", {}) or {}
     include_news = bool(dcfg.get("include_news", False))
+    include_macro = bool(dcfg.get("include_macro", True))
+    include_analyst = bool(dcfg.get("include_analyst", False))
     spec = {
         "universe_name": str(ucfg.get("name", "sp500_pit")),
         "symbols_hash": symbols_hash(list(symbols)),
@@ -358,6 +405,8 @@ def compute_dataset_id(
         "include_news": include_news,
         "general_news_page_size": int(dcfg.get("general_news_page_size", 200)) if include_news else 0,
         "general_news_max_pages": int(dcfg.get("general_news_max_pages", 1200)) if include_news else 0,
+        "include_macro": include_macro,
+        "include_analyst": include_analyst,
         "endpoints_version": list(dcfg.get("endpoints_version", [])),
         "timezone_assumption": str(cfg.get("run", {}).get("timezone_assumption", "")),
     }
@@ -388,6 +437,31 @@ def update_data(
     dcfg = cfg.get("data", {}) or {}
     start = str(dcfg.get("start_date"))
     end = str(universe.end_date_effective)
+    fetch_workers = _resolve_fetch_workers(cfg)
+    logger.info("data_fetch_workers=%d", fetch_workers)
+    endpoints_version = [str(x).strip() for x in (dcfg.get("endpoints_version") or []) if str(x).strip()]
+    enabled_endpoints = set(endpoints_version)
+
+    def _endpoint_enabled(endpoint_name: str) -> bool:
+        # Backward compatibility: if list is empty, treat all endpoints as enabled.
+        if not enabled_endpoints:
+            return True
+        if endpoint_name in enabled_endpoints:
+            return True
+        # Backward-compatible aliases used by older configs.
+        if endpoint_name in {"income_statement", "balance_sheet", "cash_flow"} and "financials" in enabled_endpoints:
+            return True
+        if endpoint_name in {
+            "analyst_estimates",
+            "grades",
+            "grades_historical",
+            "grades_consensus",
+            "price_target_summary",
+            "price_target_consensus",
+            "ratings_historical",
+        } and "analyst_premium" in enabled_endpoints:
+            return True
+        return endpoint_name in enabled_endpoints
 
     prices_path = raw_dataset_dir / "prices.parquet"
     dividends_path = raw_dataset_dir / "dividends.parquet"
@@ -396,6 +470,9 @@ def update_data(
     earnings_surprises_path = raw_dataset_dir / "earnings_surprises.parquet"
     financials_path = raw_dataset_dir / "financials_quarterly.parquet"
     news_path = raw_dataset_dir / "news.parquet"
+    macro_treasury_path = raw_dataset_dir / "macro_treasury.parquet"
+    macro_calendar_path = raw_dataset_dir / "macro_calendar.parquet"
+    analyst_path = raw_dataset_dir / "analyst_premium.parquet"
 
     # Prices (incremental by global max date; per-symbol gaps are tolerated).
     prices_existing = _read_parquet(prices_path) if prices_path.exists() and not force else pd.DataFrame()
@@ -420,8 +497,18 @@ def update_data(
     if skip_price_fetch:
         logger.info(f"skip_price_incremental_fetch no_new_business_day fetch_from>{fetch_end}")
     else:
-        for sym in tqdm(symbols, desc="fetch_prices"):
-            payload = fmp.get_prices(sym, fetch_from if fetch_from else None, end if end else None)
+        def _fetch_prices_one(sym: str) -> Any:
+            return fmp.get_prices(sym, fetch_from if fetch_from else None, end if end else None)
+
+        for sym, payload, exc in _parallel_symbol_fetch(
+            symbols,
+            desc="fetch_prices",
+            max_workers=fetch_workers,
+            fetch_one=_fetch_prices_one,
+        ):
+            if exc is not None:
+                logger.warning(f"price_fetch_failed symbol={sym}: {type(exc).__name__}: {exc}")
+                continue
             if not isinstance(payload, list):
                 continue
             df = pd.DataFrame(payload)
@@ -454,13 +541,28 @@ def update_data(
     _write_parquet(merged, prices_path)
 
     last_data_date = str(pd.to_datetime(merged["date"]).max().date())
+    skip_non_price_refresh = bool(skip_price_fetch and not force)
 
     # Dividends / Splits (best-effort, cached; force controls refetch).
     def _fetch_actions(fn, out_path: Path, desc: str) -> None:
+        if skip_non_price_refresh and out_path.exists():
+            logger.info(f"skip_non_price_refresh desc={desc} reason=no_new_business_day")
+            return
         existing = _read_parquet(out_path) if out_path.exists() and not force else pd.DataFrame()
         rows: List[pd.DataFrame] = []
-        for sym in tqdm(symbols, desc=desc):
-            payload = fn(sym, start, end)
+
+        def fetch_fn(sym: str) -> Any:
+            return fn(sym, start, end)
+
+        for sym, payload, exc in _parallel_symbol_fetch(
+            symbols,
+            desc=desc,
+            max_workers=fetch_workers,
+            fetch_one=fetch_fn,
+        ):
+            if exc is not None:
+                logger.warning(f"{desc}_failed symbol={sym}: {type(exc).__name__}: {exc}")
+                continue
             if not isinstance(payload, list) or not payload:
                 continue
             df = pd.DataFrame(payload)
@@ -481,15 +583,31 @@ def update_data(
             all_df = all_df.drop_duplicates(subset=["date", "symbol"], keep="last")
         _write_parquet(all_df, out_path)
 
-    _fetch_actions(fmp.get_dividends, dividends_path, "fetch_dividends")
-    _fetch_actions(fmp.get_splits, splits_path, "fetch_splits")
+    if _endpoint_enabled("dividends"):
+        _fetch_actions(fmp.get_dividends, dividends_path, "fetch_dividends")
+    else:
+        logger.info("skip_endpoint desc=fetch_dividends endpoint=dividends")
+    if _endpoint_enabled("splits"):
+        _fetch_actions(fmp.get_splits, splits_path, "fetch_splits")
+    else:
+        logger.info("skip_endpoint desc=fetch_splits endpoint=splits")
 
     # Earnings / Financials / News are best-effort to keep the platform operable.
     def _fetch_symbol_list(fn, out_path: Path, desc: str, max_rows: Optional[int] = None) -> None:
+        if skip_non_price_refresh and out_path.exists():
+            logger.info(f"skip_non_price_refresh desc={desc} reason=no_new_business_day")
+            return
         existing = _read_parquet(out_path) if out_path.exists() and not force else pd.DataFrame()
         rows: List[pd.DataFrame] = []
-        for sym in tqdm(symbols, desc=desc):
-            payload = fn(sym)
+        for sym, payload, exc in _parallel_symbol_fetch(
+            symbols,
+            desc=desc,
+            max_workers=fetch_workers,
+            fetch_one=fn,
+        ):
+            if exc is not None:
+                logger.warning(f"{desc}_failed symbol={sym}: {type(exc).__name__}: {exc}")
+                continue
             if not isinstance(payload, list) or not payload:
                 continue
             df = pd.DataFrame(payload)
@@ -505,25 +623,61 @@ def update_data(
             return
         _write_parquet(all_df, out_path)
 
-    try:
-        _fetch_symbol_list(fmp.get_earnings, earnings_path, "fetch_earnings")
-    except Exception as e:
-        logger.warning(f"earnings_fetch_failed: {type(e).__name__}: {e}")
+    if _endpoint_enabled("earnings"):
+        try:
+            _fetch_symbol_list(fmp.get_earnings, earnings_path, "fetch_earnings")
+        except Exception as e:
+            logger.warning(f"earnings_fetch_failed: {type(e).__name__}: {e}")
+    else:
+        logger.info("skip_endpoint desc=fetch_earnings endpoint=earnings")
 
-    try:
-        _fetch_symbol_list(fmp.get_earnings_surprises, earnings_surprises_path, "fetch_earnings_surprises")
-    except Exception as e:
-        logger.warning(f"earnings_surprises_fetch_failed: {type(e).__name__}: {e}")
+    if _endpoint_enabled("earnings_surprises"):
+        try:
+            if skip_non_price_refresh and earnings_surprises_path.exists():
+                logger.info("skip_non_price_refresh desc=fetch_earnings_surprises reason=no_new_business_day")
+            else:
+                probe_symbols = list(symbols[: min(3, len(symbols))])
+                endpoint_available = True
+                if probe_symbols:
+                    probe_failures = 0
+                    for sym in probe_symbols:
+                        try:
+                            fmp.get_earnings_surprises(sym)
+                        except Exception as probe_exc:
+                            probe_failures += 1
+                            logger.warning(
+                                "earnings_surprises_probe_failed symbol=%s: %s: %s",
+                                sym,
+                                type(probe_exc).__name__,
+                                probe_exc,
+                            )
+                    if probe_failures >= len(probe_symbols):
+                        endpoint_available = False
+                if endpoint_available:
+                    _fetch_symbol_list(fmp.get_earnings_surprises, earnings_surprises_path, "fetch_earnings_surprises")
+                else:
+                    logger.warning("skip_endpoint desc=fetch_earnings_surprises reason=probe_all_failed")
+        except Exception as e:
+            logger.warning(f"earnings_surprises_fetch_failed: {type(e).__name__}: {e}")
+    else:
+        logger.info("skip_endpoint desc=fetch_earnings_surprises endpoint=earnings_surprises")
 
     def _fetch_financials() -> None:
+        if skip_non_price_refresh and financials_path.exists():
+            logger.info("skip_non_price_refresh desc=fetch_financials_quarterly reason=no_new_business_day")
+            return
         existing = _read_parquet(financials_path) if financials_path.exists() and not force else pd.DataFrame()
         rows: List[pd.DataFrame] = []
-        for sym in tqdm(symbols, desc="fetch_financials_quarterly"):
-            for stmt_name, fn in [
-                ("income", fmp.get_income_statement),
-                ("balance", fmp.get_balance_sheet),
-                ("cashflow", fmp.get_cash_flow),
+
+        def _fetch_financials_one(sym: str) -> List[pd.DataFrame]:
+            local_rows: List[pd.DataFrame] = []
+            for stmt_name, endpoint_name, fn in [
+                ("income", "income_statement", fmp.get_income_statement),
+                ("balance", "balance_sheet", fmp.get_balance_sheet),
+                ("cashflow", "cash_flow", fmp.get_cash_flow),
             ]:
+                if not _endpoint_enabled(endpoint_name):
+                    continue
                 payload = fn(sym, period="quarter", limit=40)
                 if not isinstance(payload, list) or not payload:
                     continue
@@ -532,146 +686,351 @@ def update_data(
                     continue
                 df["symbol"] = sym
                 df["statement_type"] = stmt_name
-                rows.append(df)
+                local_rows.append(df)
+            return local_rows
+
+        for sym, payload_rows, exc in _parallel_symbol_fetch(
+            symbols,
+            desc="fetch_financials_quarterly",
+            max_workers=fetch_workers,
+            fetch_one=_fetch_financials_one,
+        ):
+            if exc is not None:
+                logger.warning(f"financials_fetch_failed symbol={sym}: {type(exc).__name__}: {exc}")
+                continue
+            if isinstance(payload_rows, list):
+                rows.extend([x for x in payload_rows if isinstance(x, pd.DataFrame) and not x.empty])
         new = pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
         all_df = pd.concat([existing, new], ignore_index=True) if (not existing.empty and not new.empty) else (existing if not existing.empty else new)
         if all_df.empty:
             return
         _write_parquet(all_df, financials_path)
 
-    try:
-        _fetch_financials()
-    except Exception as e:
-        logger.warning(f"financials_fetch_failed: {type(e).__name__}: {e}")
+    if any(_endpoint_enabled(x) for x in ("income_statement", "balance_sheet", "cash_flow")):
+        try:
+            _fetch_financials()
+        except Exception as e:
+            logger.warning(f"financials_fetch_failed: {type(e).__name__}: {e}")
+    else:
+        logger.info("skip_endpoint desc=fetch_financials_quarterly endpoint=income_statement|balance_sheet|cash_flow")
+
+    include_analyst = bool(dcfg.get("include_analyst", False))
+    if include_analyst:
+        analyst_endpoint_names = (
+            "analyst_estimates",
+            "grades",
+            "grades_historical",
+            "grades_consensus",
+            "price_target_summary",
+            "price_target_consensus",
+            "ratings_historical",
+        )
+        if not any(_endpoint_enabled(x) for x in analyst_endpoint_names):
+            logger.info("skip_endpoint desc=fetch_analyst_premium endpoint=analyst_*")
+        elif skip_non_price_refresh and analyst_path.exists():
+            logger.info("skip_non_price_refresh desc=fetch_analyst_premium reason=no_new_business_day")
+        else:
+            try:
+                existing = _read_parquet(analyst_path) if analyst_path.exists() and not force else pd.DataFrame()
+                rows: List[pd.DataFrame] = []
+
+                def _to_frame(payload: Any) -> pd.DataFrame:
+                    if isinstance(payload, dict):
+                        return pd.DataFrame([payload])
+                    if isinstance(payload, list):
+                        return pd.DataFrame(payload)
+                    return pd.DataFrame()
+
+                def _fetch_analyst_one(sym: str) -> List[pd.DataFrame]:
+                    local_rows: List[pd.DataFrame] = []
+                    calls: List[Tuple[str, str, Callable[[], Any]]] = [
+                        ("analyst_estimates", "analyst_estimates", lambda: fmp.get_analyst_estimates(sym, period="quarter", limit=40)),
+                        ("grades", "grades", lambda: fmp.get_grades(sym, limit=100)),
+                        ("grades_historical", "grades_historical", lambda: fmp.get_grades_historical(sym, limit=200)),
+                        ("grades_consensus", "grades_consensus", lambda: fmp.get_grades_consensus(sym)),
+                        ("price_target_summary", "price_target_summary", lambda: fmp.get_price_target_summary(sym)),
+                        ("price_target_consensus", "price_target_consensus", lambda: fmp.get_price_target_consensus(sym)),
+                        ("ratings_historical", "ratings_historical", lambda: fmp.get_ratings_historical(sym, limit=200)),
+                    ]
+                    for endpoint_name, source_name, fn in calls:
+                        if not _endpoint_enabled(endpoint_name):
+                            continue
+                        try:
+                            payload = fn()
+                        except Exception as exc:
+                            logger.warning(
+                                "analyst_fetch_failed source=%s symbol=%s err=%s:%s",
+                                source_name,
+                                sym,
+                                type(exc).__name__,
+                                exc,
+                            )
+                            continue
+                        df = _to_frame(payload)
+                        if df.empty:
+                            continue
+                        df["symbol"] = sym
+                        df["source"] = source_name
+                        local_rows.append(df)
+                    return local_rows
+
+                for sym, payload_rows, exc in _parallel_symbol_fetch(
+                    symbols,
+                    desc="fetch_analyst_premium",
+                    max_workers=fetch_workers,
+                    fetch_one=_fetch_analyst_one,
+                ):
+                    if exc is not None:
+                        logger.warning(f"fetch_analyst_premium_failed symbol={sym}: {type(exc).__name__}: {exc}")
+                        continue
+                    if isinstance(payload_rows, list):
+                        rows.extend([x for x in payload_rows if isinstance(x, pd.DataFrame) and not x.empty])
+
+                new = pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
+                all_df = (
+                    pd.concat([existing, new], ignore_index=True)
+                    if (not existing.empty and not new.empty)
+                    else (existing if not existing.empty else new)
+                )
+                if not all_df.empty:
+                    dedupe_cols = [
+                        c
+                        for c in [
+                            "symbol",
+                            "source",
+                            "date",
+                            "publishedDate",
+                            "published_date",
+                            "gradingCompany",
+                            "newGrade",
+                            "previousGrade",
+                            "title",
+                            "url",
+                            "newsURL",
+                        ]
+                        if c in all_df.columns
+                    ]
+                    if dedupe_cols:
+                        all_df = all_df.drop_duplicates(subset=dedupe_cols, keep="last").reset_index(drop=True)
+                    _write_parquet(all_df, analyst_path)
+            except Exception as e:
+                logger.warning(f"analyst_premium_fetch_failed: {type(e).__name__}: {e}")
+
+    include_macro = bool(dcfg.get("include_macro", True))
+    if include_macro:
+        if _endpoint_enabled("treasury_rates"):
+            if skip_non_price_refresh and macro_treasury_path.exists():
+                logger.info("skip_non_price_refresh desc=fetch_treasury_rates reason=no_new_business_day")
+            else:
+                try:
+                    existing = _read_parquet(macro_treasury_path) if macro_treasury_path.exists() and not force else pd.DataFrame()
+                    payload = fmp.get_treasury_rates(start, end)
+                    new = pd.DataFrame(payload) if isinstance(payload, list) else pd.DataFrame()
+                    if not new.empty and "date" in new.columns:
+                        new["date"] = pd.to_datetime(new["date"], errors="coerce").dt.date
+                        new = new[new["date"].notna()].reset_index(drop=True)
+                        start_date = _parse_date(start)
+                        end_date = _parse_date(end)
+                        if start_date is not None:
+                            new = new[new["date"] >= start_date]
+                        if end_date is not None:
+                            new = new[new["date"] <= end_date]
+                    all_df = (
+                        pd.concat([existing, new], ignore_index=True)
+                        if (not existing.empty and not new.empty)
+                        else (existing if not existing.empty else new)
+                    )
+                    if not all_df.empty and "date" in all_df.columns:
+                        all_df = all_df.drop_duplicates(subset=["date"], keep="last").sort_values(["date"]).reset_index(drop=True)
+                        _write_parquet(all_df, macro_treasury_path)
+                except Exception as e:
+                    logger.warning(f"macro_treasury_fetch_failed: {type(e).__name__}: {e}")
+        else:
+            logger.info("skip_endpoint desc=fetch_treasury_rates endpoint=treasury_rates")
+
+        if _endpoint_enabled("macro_calendar"):
+            if skip_non_price_refresh and macro_calendar_path.exists():
+                logger.info("skip_non_price_refresh desc=fetch_macro_calendar reason=no_new_business_day")
+            else:
+                try:
+                    existing = _read_parquet(macro_calendar_path) if macro_calendar_path.exists() and not force else pd.DataFrame()
+                    payload = fmp.get_macro_calendar(start, end)
+                    new = pd.DataFrame(payload) if isinstance(payload, list) else pd.DataFrame()
+                    if not new.empty and "date" in new.columns:
+                        ts = pd.to_datetime(new["date"], errors="coerce", utc=True)
+                        new["_event_date"] = ts.dt.tz_localize(None).dt.date
+                        new = new[new["_event_date"].notna()].reset_index(drop=True)
+                        start_date = _parse_date(start)
+                        end_date = _parse_date(end)
+                        if start_date is not None:
+                            new = new[new["_event_date"] >= start_date]
+                        if end_date is not None:
+                            new = new[new["_event_date"] <= end_date]
+                        new = new.drop(columns=["_event_date"])
+                    all_df = (
+                        pd.concat([existing, new], ignore_index=True)
+                        if (not existing.empty and not new.empty)
+                        else (existing if not existing.empty else new)
+                    )
+                    if not all_df.empty:
+                        dedupe_cols = [c for c in ["date", "country", "event", "currency", "actual", "estimate", "previous"] if c in all_df.columns]
+                        if dedupe_cols:
+                            all_df = all_df.drop_duplicates(subset=dedupe_cols, keep="last").reset_index(drop=True)
+                        _write_parquet(all_df, macro_calendar_path)
+                except Exception as e:
+                    logger.warning(f"macro_calendar_fetch_failed: {type(e).__name__}: {e}")
+        else:
+            logger.info("skip_endpoint desc=fetch_macro_calendar endpoint=macro_calendar")
 
     include_news = bool(dcfg.get("include_news", False))
     if include_news:
-        try:
-            existing = _read_parquet(news_path) if news_path.exists() and not force else pd.DataFrame()
-            rows: List[pd.DataFrame] = []
-            stock_failures = 0
-            stock_max_failures = 5
-            start_date = _parse_date(start)
-            end_date = _parse_date(end)
-
-            def _news_event_dates(frame: pd.DataFrame) -> pd.Series:
-                for cand in ("publishedDate", "published_date", "date"):
-                    if cand in frame.columns:
-                        ts = pd.to_datetime(frame[cand], errors="coerce", utc=True)
-                        return ts.dt.tz_localize(None).dt.date
-                return pd.Series([pd.NaT] * len(frame), index=frame.index)
-
-            for sym in tqdm(symbols, desc="fetch_news"):
-                try:
-                    payload = fmp.get_stock_news(sym, limit=50)
-                except Exception as e:
-                    stock_failures += 1
-                    logger.warning(f"stock_news_fetch_failed symbol={sym}: {type(e).__name__}: {e}")
-                    # Avoid long retry tails when endpoint is unavailable for the current key/tier.
-                    if stock_failures >= stock_max_failures and not rows:
-                        logger.warning("stock_news_fetch_disabled after repeated failures; trying general_news only")
-                        break
-                    continue
-                if not isinstance(payload, list) or not payload:
-                    continue
-                df = pd.DataFrame(payload)
-                if df.empty:
-                    continue
-                df["symbol"] = sym
-                rows.append(df)
+        news_stock_enabled = _endpoint_enabled("stock_news")
+        news_general_enabled = _endpoint_enabled("general_news")
+        if not news_stock_enabled and not news_general_enabled:
+            logger.info("skip_endpoint desc=fetch_news endpoint=stock_news|general_news")
+            include_news = False
+    if include_news:
+        if skip_non_price_refresh and news_path.exists():
+            logger.info("skip_non_price_refresh desc=fetch_news reason=no_new_business_day")
+        else:
             try:
-                page_size = max(1, min(int(dcfg.get("general_news_page_size", 200)), 200))
-                max_pages = max(1, int(dcfg.get("general_news_max_pages", 1200)))
+                existing = _read_parquet(news_path) if news_path.exists() and not force else pd.DataFrame()
+                rows: List[pd.DataFrame] = []
+                stock_failures = 0
+                stock_max_failures = 5
+                start_date = _parse_date(start)
+                end_date = _parse_date(end)
 
-                existing_min_date: Optional[date] = None
-                existing_covers_start = False
-                if not existing.empty:
-                    existing_dates = _news_event_dates(existing)
-                    if existing_dates.notna().any():
-                        existing_min_date = existing_dates.dropna().min()
-                        if start_date is not None and existing_min_date <= start_date:
-                            existing_covers_start = True
+                def _news_event_dates(frame: pd.DataFrame) -> pd.Series:
+                    for cand in ("publishedDate", "published_date", "date"):
+                        if cand in frame.columns:
+                            ts = pd.to_datetime(frame[cand], errors="coerce", utc=True)
+                            return ts.dt.tz_localize(None).dt.date
+                    return pd.Series([pd.NaT] * len(frame), index=frame.index)
 
-                seen_page_markers: set[str] = set()
-                repeated_page_count = 0
+                if news_stock_enabled:
+                    for sym in tqdm(symbols, desc="fetch_news"):
+                        try:
+                            payload = fmp.get_stock_news(sym, limit=50)
+                        except Exception as e:
+                            stock_failures += 1
+                            logger.warning(f"stock_news_fetch_failed symbol={sym}: {type(e).__name__}: {e}")
+                            # Avoid long retry tails when endpoint is unavailable for the current key/tier.
+                            if stock_failures >= stock_max_failures and not rows:
+                                logger.warning("stock_news_fetch_disabled after repeated failures; trying general_news only")
+                                break
+                            continue
+                        if not isinstance(payload, list) or not payload:
+                            continue
+                        df = pd.DataFrame(payload)
+                        if df.empty:
+                            continue
+                        df["symbol"] = sym
+                        rows.append(df)
+                else:
+                    logger.info("skip_endpoint desc=fetch_news endpoint=stock_news")
 
-                def _general_news_page_marker(frame: pd.DataFrame) -> Optional[str]:
-                    if frame.empty:
-                        return None
-                    marker_cols = [
-                        c
-                        for c in (
-                            "publishedDate",
-                            "published_date",
-                            "date",
-                            "title",
-                            "url",
-                            "link",
-                            "symbol",
-                            "tickers",
-                            "ticker",
-                        )
-                        if c in frame.columns
-                    ]
-                    if not marker_cols:
-                        return None
-                    marker_rows = (
-                        frame[marker_cols]
-                        .fillna("")
-                        .astype(str)
-                        .agg("|".join, axis=1)
-                        .tolist()
-                    )
-                    return sha1_hex("\n".join(marker_rows))
+                if news_general_enabled:
+                    try:
+                        page_size = max(1, min(int(dcfg.get("general_news_page_size", 200)), 200))
+                        max_pages = max(1, int(dcfg.get("general_news_max_pages", 1200)))
 
-                for page in range(max_pages):
-                    gnews = fmp.get_general_news(limit=page_size, page=page)
-                    if not isinstance(gnews, list) or not gnews:
-                        break
-                    gdf = pd.DataFrame(gnews)
-                    if gdf.empty:
-                        break
-                    gdf["_event_date"] = _news_event_dates(gdf)
-                    gdf = gdf[gdf["_event_date"].notna()].copy()
-                    if gdf.empty:
-                        continue
+                        existing_min_date: Optional[date] = None
+                        existing_covers_start = False
+                        if not existing.empty:
+                            existing_dates = _news_event_dates(existing)
+                            if existing_dates.notna().any():
+                                existing_min_date = existing_dates.dropna().min()
+                                if start_date is not None and existing_min_date <= start_date:
+                                    existing_covers_start = True
 
-                    oldest = gdf["_event_date"].min()
-                    page_marker = _general_news_page_marker(gdf)
-                    if page_marker in seen_page_markers:
-                        repeated_page_count += 1
-                        # Some tiers return repeated pages for large page ranges; stop after streak.
-                        if repeated_page_count >= 3:
-                            break
-                        continue
-                    repeated_page_count = 0
-                    if page_marker:
-                        seen_page_markers.add(page_marker)
+                        seen_page_markers: set[str] = set()
+                        repeated_page_count = 0
 
-                    if end_date is not None:
-                        gdf = gdf[gdf["_event_date"] <= end_date]
-                    if start_date is not None:
-                        gdf = gdf[gdf["_event_date"] >= start_date]
-                    if not gdf.empty:
-                        if "symbol" not in gdf.columns:
-                            gdf["symbol"] = "GENERAL"
-                        rows.append(gdf.drop(columns=["_event_date"]))
+                        def _general_news_page_marker(frame: pd.DataFrame) -> Optional[str]:
+                            if frame.empty:
+                                return None
+                            marker_cols = [
+                                c
+                                for c in (
+                                    "publishedDate",
+                                    "published_date",
+                                    "date",
+                                    "title",
+                                    "url",
+                                    "link",
+                                    "symbol",
+                                    "tickers",
+                                    "ticker",
+                                )
+                                if c in frame.columns
+                            ]
+                            if not marker_cols:
+                                return None
+                            marker_rows = (
+                                frame[marker_cols]
+                                .fillna("")
+                                .astype(str)
+                                .agg("|".join, axis=1)
+                                .tolist()
+                            )
+                            return sha1_hex("\n".join(marker_rows))
 
-                    if start_date is not None and oldest <= start_date:
-                        break
-                    if existing_covers_start and existing_min_date is not None and oldest <= existing_min_date:
-                        break
+                        for page in range(max_pages):
+                            gnews = fmp.get_general_news(limit=page_size, page=page)
+                            if not isinstance(gnews, list) or not gnews:
+                                break
+                            gdf = pd.DataFrame(gnews)
+                            if gdf.empty:
+                                break
+                            gdf["_event_date"] = _news_event_dates(gdf)
+                            gdf = gdf[gdf["_event_date"].notna()].copy()
+                            if gdf.empty:
+                                continue
+
+                            oldest = gdf["_event_date"].min()
+                            page_marker = _general_news_page_marker(gdf)
+                            if page_marker in seen_page_markers:
+                                repeated_page_count += 1
+                                # Some tiers return repeated pages for large page ranges; stop after streak.
+                                if repeated_page_count >= 3:
+                                    break
+                                continue
+                            repeated_page_count = 0
+                            if page_marker:
+                                seen_page_markers.add(page_marker)
+
+                            if end_date is not None:
+                                gdf = gdf[gdf["_event_date"] <= end_date]
+                            if start_date is not None:
+                                gdf = gdf[gdf["_event_date"] >= start_date]
+                            if not gdf.empty:
+                                if "symbol" not in gdf.columns:
+                                    gdf["symbol"] = "GENERAL"
+                                rows.append(gdf.drop(columns=["_event_date"]))
+
+                            if start_date is not None and oldest <= start_date:
+                                break
+                            if existing_covers_start and existing_min_date is not None and oldest <= existing_min_date:
+                                break
+                    except Exception as e:
+                        logger.warning(f"general_news_fetch_failed: {type(e).__name__}: {e}")
+                else:
+                    logger.info("skip_endpoint desc=fetch_news endpoint=general_news")
+
+                new = pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
+                all_df = (
+                    pd.concat([existing, new], ignore_index=True)
+                    if (not existing.empty and not new.empty)
+                    else (existing if not existing.empty else new)
+                )
+                if not all_df.empty:
+                    dedupe_cols = [c for c in ["symbol", "publishedDate", "date", "title", "url", "link"] if c in all_df.columns]
+                    if dedupe_cols:
+                        all_df = all_df.drop_duplicates(subset=dedupe_cols, keep="last").reset_index(drop=True)
+                    _write_parquet(all_df, news_path)
             except Exception as e:
-                logger.warning(f"general_news_fetch_failed: {type(e).__name__}: {e}")
-            new = pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
-            all_df = pd.concat([existing, new], ignore_index=True) if (not existing.empty and not new.empty) else (existing if not existing.empty else new)
-            if not all_df.empty:
-                dedupe_cols = [c for c in ["symbol", "publishedDate", "date", "title", "url", "link"] if c in all_df.columns]
-                if dedupe_cols:
-                    all_df = all_df.drop_duplicates(subset=dedupe_cols, keep="last").reset_index(drop=True)
-                _write_parquet(all_df, news_path)
-        except Exception as e:
-            logger.warning(f"news_fetch_failed: {type(e).__name__}: {e}")
+                logger.warning(f"news_fetch_failed: {type(e).__name__}: {e}")
 
     # Save dataset spec for reproducibility.
     spec = {
@@ -688,6 +1047,8 @@ def update_data(
         "include_news": bool(dcfg.get("include_news", False)),
         "general_news_page_size": int(dcfg.get("general_news_page_size", 200)) if bool(dcfg.get("include_news", False)) else 0,
         "general_news_max_pages": int(dcfg.get("general_news_max_pages", 1200)) if bool(dcfg.get("include_news", False)) else 0,
+        "include_macro": bool(dcfg.get("include_macro", True)),
+        "include_analyst": bool(dcfg.get("include_analyst", False)),
         "endpoints_version": list(dcfg.get("endpoints_version", [])),
         "timezone_assumption": str(cfg.get("run", {}).get("timezone_assumption", "")),
     }
