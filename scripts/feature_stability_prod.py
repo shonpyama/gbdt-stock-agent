@@ -72,6 +72,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Run multi-period feature stability validation for production.")
     parser.add_argument("--base-conf", default="conf/default.yaml", help="Base config path used as a template.")
     parser.add_argument(
+        "--only-candidates",
+        default="",
+        help="Comma-separated candidate names to run (default: all).",
+    )
+    parser.add_argument(
         "--promote-default",
         action="store_true",
         help="Apply selected feature params to base config after ranking.",
@@ -96,6 +101,12 @@ def main() -> int:
         {"name": "lb_1_5_20_60_120", "lookbacks": [1, 5, 20, 60, 120], "event_shift": 1},
         {"name": "lb_1_5_20_60_120_shift2", "lookbacks": [1, 5, 20, 60, 120], "event_shift": 2},
     ]
+    only_raw = str(args.only_candidates or "").strip()
+    if only_raw:
+        allow = {x.strip() for x in only_raw.split(",") if x.strip()}
+        candidates = [c for c in candidates if c["name"] in allow]
+        if not candidates:
+            raise ValueError(f"No candidates matched --only-candidates={only_raw!r}")
 
     end_dates = _parse_end_dates()
     out_dir = project_dir / "reports"

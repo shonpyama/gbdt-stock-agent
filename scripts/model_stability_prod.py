@@ -93,6 +93,11 @@ def main() -> int:
         help="Base config path used as a template.",
     )
     parser.add_argument(
+        "--only-candidates",
+        default="",
+        help="Comma-separated candidate names to run (default: all).",
+    )
+    parser.add_argument(
         "--promote-default",
         action="store_true",
         help="Apply selected model params to base config after ranking.",
@@ -111,6 +116,12 @@ def main() -> int:
 
     end_dates = _parse_end_dates()
     candidates = _candidate_map()
+    only_raw = str(args.only_candidates or "").strip()
+    if only_raw:
+        allow = {x.strip() for x in only_raw.split(",") if x.strip()}
+        candidates = [c for c in candidates if c["name"] in allow]
+        if not candidates:
+            raise ValueError(f"No candidates matched --only-candidates={only_raw!r}")
 
     out_dir = project_dir / "reports"
     out_dir.mkdir(parents=True, exist_ok=True)
