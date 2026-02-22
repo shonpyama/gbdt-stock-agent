@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import logging
 import os
@@ -425,9 +426,14 @@ def run_pipeline(
         earnings_path = raw_dir / "earnings.parquet"
         splits_path = raw_dir / "splits.parquet"
         dividends_path = raw_dir / "dividends.parquet"
+        news_path = raw_dir / "news.parquet"
         earnings = pd.read_parquet(earnings_path) if earnings_path.exists() else pd.DataFrame()
         splits_df = pd.read_parquet(splits_path) if splits_path.exists() else pd.DataFrame()
         dividends_df = pd.read_parquet(dividends_path) if dividends_path.exists() else pd.DataFrame()
+        include_news = bool((cfg.get("data") or {}).get("include_news", False))
+        news: Optional[pd.DataFrame] = None
+        if include_news:
+            news = pd.read_parquet(news_path) if news_path.exists() else pd.DataFrame()
 
         # Stage 20
         if _should_run("stage_20_validation_passed"):
@@ -469,7 +475,7 @@ def run_pipeline(
             mem_in = pd.read_parquet(proc_dir / "universe_membership_validated.parquet")
 
             fcfg = cfg.get("features") or {}
-            feature_res = build_feature_store(
+            feature_kwargs = dict(
                 dataset_id=dataset_id,
                 prices=prices_in,
                 universe_membership=mem_in,
@@ -479,6 +485,9 @@ def run_pipeline(
                 event_safe_shift_days=int(fcfg.get("event_safe_shift_days", 1)),
                 out_dir=paths.feature_store_dir,
             )
+            if "news" in inspect.signature(build_feature_store).parameters:
+                feature_kwargs["news"] = news
+            feature_res = build_feature_store(**feature_kwargs)
             metrics["feature_store_id"] = feature_res.feature_store_id
             state_payload["feature_store_id"] = feature_res.feature_store_id
 

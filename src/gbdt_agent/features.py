@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -14,6 +15,43 @@ from pandas.tseries.offsets import BDay
 
 
 logger = logging.getLogger(__name__)
+
+_NEWS_POSITIVE_TOKENS = {
+    "beat",
+    "beats",
+    "bullish",
+    "buy",
+    "growth",
+    "gain",
+    "gains",
+    "improve",
+    "improves",
+    "improved",
+    "optimistic",
+    "outperform",
+    "strong",
+    "upgrade",
+    "upside",
+}
+_NEWS_NEGATIVE_TOKENS = {
+    "bearish",
+    "cut",
+    "cuts",
+    "decline",
+    "declines",
+    "downgrade",
+    "drop",
+    "drops",
+    "fall",
+    "falls",
+    "miss",
+    "misses",
+    "risk",
+    "risks",
+    "warning",
+    "weak",
+}
+_NEWS_TOKEN_RE = re.compile(r"[a-z']+")
 
 
 def _sha1(text: str) -> str:
@@ -148,12 +186,111 @@ def _prepare_earnings_features(
     return df
 
 
+def _simple_lexicon_sentiment(text: str) -> float:
+    toks = _NEWS_TOKEN_RE.findall(str(text).lower())
+    if not toks:
+        return float("nan")
+    pos = sum(1 for t in toks if t in _NEWS_POSITIVE_TOKENS)
+    neg = sum(1 for t in toks if t in _NEWS_NEGATIVE_TOKENS)
+    return float((pos - neg) / max(1, len(toks)))
+
+
+def _prepare_news_features(
+    news: pd.DataFrame,
+    *,
+    event_safe_shift_days: int,
+) -> pd.DataFrame:
+    cols = [
+        "decision_date",
+        "symbol",
+        "news_count_1d",
+        "news_sent_mean_1d",
+        "news_source_nuniq_1d",
+        "mkt_news_count_1d",
+        "mkt_news_sent_mean_1d",
+    ]
+    if news.empty:
+        return pd.DataFrame(columns=cols)
+
+    df = news.copy()
+    if "symbol" not in df.columns:
+        df["symbol"] = "GENERAL"
+    df["symbol"] = (
+        df["symbol"]
+        .fillna("GENERAL")
+        .astype(str)
+        .str.upper()
+        .str.split(",")
+        .str[0]
+        .str.strip()
+        .replace("", "GENERAL")
+    )
+
+    event_ts = None
+    for cand in ["publishedDate", "published_date", "date"]:
+        if cand in df.columns:
+            event_ts = pd.to_datetime(df[cand], errors="coerce", utc=True)
+            if event_ts.notna().any():
+                break
+    if event_ts is None:
+        return pd.DataFrame(columns=cols)
+
+    df["event_date"] = event_ts.dt.tz_localize(None).dt.date
+    df = df.dropna(subset=["event_date"])
+    if df.empty:
+        return pd.DataFrame(columns=cols)
+
+    sent = None
+    for cand in ["sentiment", "sentimentScore", "sentiment_score"]:
+        if cand in df.columns:
+            s = pd.to_numeric(df[cand], errors="coerce")
+            if s.notna().any():
+                sent = s.clip(-1.0, 1.0)
+                break
+    if sent is None:
+        title = df["title"].astype(str) if "title" in df.columns else pd.Series("", index=df.index)
+        body = df["text"].astype(str) if "text" in df.columns else pd.Series("", index=df.index)
+        sent = (title.fillna("") + " " + body.fillna("")).map(_simple_lexicon_sentiment)
+    df["news_sentiment"] = pd.to_numeric(sent, errors="coerce")
+
+    if "site" in df.columns:
+        df["news_source"] = df["site"].fillna("unknown").astype(str)
+    elif "source" in df.columns:
+        df["news_source"] = df["source"].fillna("unknown").astype(str)
+    else:
+        df["news_source"] = "unknown"
+
+    df["decision_date"] = (pd.to_datetime(df["event_date"]) + BDay(int(event_safe_shift_days))).dt.date
+
+    per_symbol = (
+        df.groupby(["decision_date", "symbol"], as_index=False)
+        .agg(
+            news_count_1d=("symbol", "size"),
+            news_sent_mean_1d=("news_sentiment", "mean"),
+            news_source_nuniq_1d=("news_source", "nunique"),
+        )
+        .reset_index(drop=True)
+    )
+    per_market = (
+        df.groupby(["decision_date"], as_index=False)
+        .agg(
+            mkt_news_count_1d=("symbol", "size"),
+            mkt_news_sent_mean_1d=("news_sentiment", "mean"),
+        )
+        .reset_index(drop=True)
+    )
+    out = per_symbol.merge(per_market, on="decision_date", how="left")
+    out = out[out["symbol"] != "GENERAL"].reset_index(drop=True)
+    return out[cols]
+
+
 def build_feature_store(
     *,
     dataset_id: str,
     prices: pd.DataFrame,
     universe_membership: pd.DataFrame,
     earnings: Optional[pd.DataFrame],
+    news: Optional[pd.DataFrame],
     adjusted_flag: bool,
     lookbacks: Sequence[int],
     event_safe_shift_days: int,
@@ -183,12 +320,62 @@ def build_feature_store(
     if "eps_surprise" in feats.columns:
         feats["eps_surprise"] = pd.to_numeric(feats["eps_surprise"], errors="coerce").fillna(0.0)
 
+    if news is not None:
+        n_feats = _prepare_news_features(news, event_safe_shift_days=event_safe_shift_days)
+        if not n_feats.empty:
+            feats = feats.merge(n_feats, on=["decision_date", "symbol"], how="left")
+
+        base_cols = [
+            "news_count_1d",
+            "news_sent_mean_1d",
+            "news_source_nuniq_1d",
+            "mkt_news_count_1d",
+            "mkt_news_sent_mean_1d",
+        ]
+        for c in base_cols:
+            if c not in feats.columns:
+                feats[c] = 0.0
+            feats[c] = pd.to_numeric(feats[c], errors="coerce").fillna(0.0)
+
+        feats = feats.sort_values(["symbol", "decision_date"]).reset_index(drop=True)
+        feats["news_count_5d"] = (
+            feats.groupby("symbol")["news_count_1d"].rolling(5, min_periods=1).sum().reset_index(level=0, drop=True)
+        )
+        feats["news_count_20d"] = (
+            feats.groupby("symbol")["news_count_1d"].rolling(20, min_periods=1).sum().reset_index(level=0, drop=True)
+        )
+        feats["news_sent_mean_5d"] = (
+            feats.groupby("symbol")["news_sent_mean_1d"].rolling(5, min_periods=1).mean().reset_index(level=0, drop=True)
+        )
+        feats["news_sent_std_20d"] = (
+            feats.groupby("symbol")["news_sent_mean_1d"].rolling(20, min_periods=2).std().reset_index(level=0, drop=True)
+        )
+        feats["mkt_news_count_20d"] = (
+            feats.groupby("symbol")["mkt_news_count_1d"].rolling(20, min_periods=1).sum().reset_index(level=0, drop=True)
+        )
+        feats["mkt_news_sent_mean_5d"] = (
+            feats.groupby("symbol")["mkt_news_sent_mean_1d"].rolling(5, min_periods=1).mean().reset_index(level=0, drop=True)
+        )
+        feats["news_attention_20d"] = feats["news_count_20d"] / (feats["mkt_news_count_20d"] + 1e-12)
+
+        for c in [
+            "news_count_5d",
+            "news_count_20d",
+            "news_sent_mean_5d",
+            "news_sent_std_20d",
+            "mkt_news_count_20d",
+            "mkt_news_sent_mean_5d",
+            "news_attention_20d",
+        ]:
+            feats[c] = pd.to_numeric(feats[c], errors="coerce").fillna(0.0)
+
     # Build spec + IDs
     feature_cols = [c for c in feats.columns if c not in {"decision_date", "symbol", "feature_available_date"}]
     spec = {
         "dataset_id": dataset_id,
         "lookbacks": list(lookbacks),
         "event_safe_shift_days": int(event_safe_shift_days),
+        "include_news_features": bool(news is not None),
         "adjusted_flag": bool(adjusted_flag),
         "feature_cols": sorted(feature_cols),
     }

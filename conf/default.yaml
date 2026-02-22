@@ -29,7 +29,9 @@ data:
     - "income_statement"
     - "balance_sheet"
     - "cash_flow"
-  include_news: false
+    - "stock_news"
+    - "general_news"
+  include_news: true
 
 fmp:
   base_url: "https://financialmodelingprep.com/stable"

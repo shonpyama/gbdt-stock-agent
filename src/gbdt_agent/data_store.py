@@ -354,6 +354,7 @@ def compute_dataset_id(
         "start_date": str(dcfg.get("start_date")),
         "end_date": str(effective_end_date if effective_end_date is not None else (dcfg.get("end_date") or "")),
         "adjusted_flag": bool(dcfg.get("adjusted_flag", True)),
+        "include_news": bool(dcfg.get("include_news", False)),
         "endpoints_version": list(dcfg.get("endpoints_version", [])),
         "timezone_assumption": str(cfg.get("run", {}).get("timezone_assumption", "")),
     }
@@ -583,6 +584,7 @@ def update_data(
         "symbols_count": len(symbols),
         "symbols_hash": symbols_hash(symbols),
         "adjusted_flag": bool(dcfg.get("adjusted_flag", True)),
+        "include_news": bool(dcfg.get("include_news", False)),
         "endpoints_version": list(dcfg.get("endpoints_version", [])),
         "timezone_assumption": str(cfg.get("run", {}).get("timezone_assumption", "")),
     }
