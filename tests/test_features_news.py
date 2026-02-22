@@ -94,3 +94,38 @@ def test_build_feature_store_without_news_keeps_legacy_feature_set(tmp_path: Pat
 
     news_cols = [c for c in res.features.columns if c.startswith("news_") or c.startswith("mkt_news_")]
     assert news_cols == []
+
+
+def test_build_feature_store_with_general_news_tickers_maps_symbol(tmp_path: Path) -> None:
+    symbols = ["AAA", "BBB", "CCC"]
+    dates = list(pd.bdate_range("2024-01-01", "2024-06-30").date)
+    prices = _make_prices(symbols, dates)
+    membership = _make_membership(symbols, dates)
+    earnings = pd.DataFrame(columns=["symbol", "date"])
+
+    news = pd.DataFrame(
+        [
+            {
+                "date": str(dates[40]),
+                "tickers": "NASDAQ:CCC",
+                "title": "Upgrade after strong growth outlook",
+                "content": "Analysts upgrade name and raise estimates",
+                "site": "fmp",
+            }
+        ]
+    )
+
+    res = build_feature_store(
+        dataset_id="ds_tickers_news",
+        prices=prices,
+        universe_membership=membership,
+        earnings=earnings,
+        news=news,
+        adjusted_flag=True,
+        lookbacks=[1, 5, 20, 60],
+        event_safe_shift_days=1,
+        out_dir=tmp_path / "feature_store",
+    )
+
+    ccc = res.features[res.features["symbol"] == "CCC"]
+    assert bool((ccc["news_count_20d"] > 0.0).any())

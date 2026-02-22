@@ -52,6 +52,8 @@ _NEWS_NEGATIVE_TOKENS = {
     "weak",
 }
 _NEWS_TOKEN_RE = re.compile(r"[a-z']+")
+_NEWS_TICKER_SPLIT_RE = re.compile(r"[,;\s|]+")
+_NEWS_TICKER_RE = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,9}$")
 
 
 def _sha1(text: str) -> str:
@@ -195,6 +197,19 @@ def _simple_lexicon_sentiment(text: str) -> float:
     return float((pos - neg) / max(1, len(toks)))
 
 
+def _extract_news_symbol(value: Any) -> str:
+    raw = str(value).upper().strip() if value is not None else ""
+    if not raw:
+        return "GENERAL"
+    token = _NEWS_TICKER_SPLIT_RE.split(raw)[0].strip()
+    if ":" in token:
+        token = token.split(":")[-1].strip()
+    token = token.replace("/", "").replace("\\", "").strip()
+    if not token:
+        return "GENERAL"
+    return token if _NEWS_TICKER_RE.match(token) else "GENERAL"
+
+
 def _prepare_news_features(
     news: pd.DataFrame,
     *,
@@ -214,7 +229,16 @@ def _prepare_news_features(
 
     df = news.copy()
     if "symbol" not in df.columns:
-        df["symbol"] = "GENERAL"
+        if "tickers" in df.columns:
+            df["symbol"] = df["tickers"].map(_extract_news_symbol)
+        elif "ticker" in df.columns:
+            df["symbol"] = df["ticker"].map(_extract_news_symbol)
+        else:
+            df["symbol"] = "GENERAL"
+    elif "tickers" in df.columns:
+        missing_symbol = df["symbol"].isna() | (df["symbol"].astype(str).str.strip() == "")
+        if bool(missing_symbol.any()):
+            df.loc[missing_symbol, "symbol"] = df.loc[missing_symbol, "tickers"].map(_extract_news_symbol)
     df["symbol"] = (
         df["symbol"]
         .fillna("GENERAL")
@@ -222,6 +246,8 @@ def _prepare_news_features(
         .str.upper()
         .str.split(",")
         .str[0]
+        .str.split(":")
+        .str[-1]
         .str.strip()
         .replace("", "GENERAL")
     )
@@ -250,11 +276,15 @@ def _prepare_news_features(
     if sent is None:
         title = df["title"].astype(str) if "title" in df.columns else pd.Series("", index=df.index)
         body = df["text"].astype(str) if "text" in df.columns else pd.Series("", index=df.index)
+        if "content" in df.columns:
+            body = body.fillna("") + " " + df["content"].astype(str).fillna("")
         sent = (title.fillna("") + " " + body.fillna("")).map(_simple_lexicon_sentiment)
     df["news_sentiment"] = pd.to_numeric(sent, errors="coerce")
 
     if "site" in df.columns:
         df["news_source"] = df["site"].fillna("unknown").astype(str)
+    elif "publisher" in df.columns:
+        df["news_source"] = df["publisher"].fillna("unknown").astype(str)
     elif "source" in df.columns:
         df["news_source"] = df["source"].fillna("unknown").astype(str)
     else:

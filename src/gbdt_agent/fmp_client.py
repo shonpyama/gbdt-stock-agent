@@ -33,8 +33,9 @@ DEFAULT_ENDPOINTS = {
     "income_statement": "income-statement",
     "balance_sheet": "balance-sheet-statement",
     "cash_flow": "cash-flow-statement",
-    "stock_news": "stock-news",
-    "general_news": "general-news",
+    # 2026 stable API path changes.
+    "stock_news": "news/stock",
+    "general_news": "fmp-articles",
 }
 
 
@@ -364,12 +365,15 @@ class FMPClient:
             ep,
             params={"symbol": symbol, "limit": limit},
             endpoint_name="stock_news",
+            max_attempts=2,
         )
 
     def get_general_news(self, limit: int = 100) -> Any:
         ep = self.endpoint_for("general_news")
+        size = max(1, min(int(limit), 200))
         return self.request(
             ep,
-            params={"limit": limit},
+            params={"page": 0, "size": size},
             endpoint_name="general_news",
+            max_attempts=2,
         )

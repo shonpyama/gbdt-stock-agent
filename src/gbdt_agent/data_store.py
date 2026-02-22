@@ -546,8 +546,19 @@ def update_data(
         try:
             existing = _read_parquet(news_path) if news_path.exists() and not force else pd.DataFrame()
             rows: List[pd.DataFrame] = []
+            stock_failures = 0
+            stock_max_failures = 5
             for sym in tqdm(symbols, desc="fetch_news"):
-                payload = fmp.get_stock_news(sym, limit=50)
+                try:
+                    payload = fmp.get_stock_news(sym, limit=50)
+                except Exception as e:
+                    stock_failures += 1
+                    logger.warning(f"stock_news_fetch_failed symbol={sym}: {type(e).__name__}: {e}")
+                    # Avoid long retry tails when endpoint is unavailable for the current key/tier.
+                    if stock_failures >= stock_max_failures and not rows:
+                        logger.warning("stock_news_fetch_disabled after repeated failures; trying general_news only")
+                        break
+                    continue
                 if not isinstance(payload, list) or not payload:
                     continue
                 df = pd.DataFrame(payload)
@@ -568,6 +579,9 @@ def update_data(
             new = pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
             all_df = pd.concat([existing, new], ignore_index=True) if (not existing.empty and not new.empty) else (existing if not existing.empty else new)
             if not all_df.empty:
+                dedupe_cols = [c for c in ["symbol", "publishedDate", "date", "title", "url", "link"] if c in all_df.columns]
+                if dedupe_cols:
+                    all_df = all_df.drop_duplicates(subset=dedupe_cols, keep="last").reset_index(drop=True)
                 _write_parquet(all_df, news_path)
         except Exception as e:
             logger.warning(f"news_fetch_failed: {type(e).__name__}: {e}")

@@ -124,3 +124,81 @@ def test_update_data_skips_price_fetch_when_no_new_business_day(tmp_path: Path) 
     _, _, last_data_date = update_data(cfg, paths, fmp, force=False)
     assert fmp.price_calls == 0
     assert last_data_date == "2026-02-20"
+
+
+def test_update_data_keeps_general_news_when_stock_news_fails(tmp_path: Path) -> None:
+    conf_dir = tmp_path / "conf"
+    conf_dir.mkdir(parents=True, exist_ok=True)
+    (conf_dir / "universe_custom.yaml").write_text(yaml.safe_dump({"symbols": ["AAPL"]}, sort_keys=False))
+
+    cfg = {
+        "universe": {
+            "provider": "custom_list",
+            "fallback_small50": {"enabled": False, "symbols": []},
+        },
+        "data": {
+            "start_date": "2026-02-20",
+            "end_date": "2026-02-20",
+            "adjusted_flag": False,
+            "include_news": True,
+            "endpoints_version": ["prices_eod", "stock_news", "general_news"],
+        },
+    }
+    paths = ProjectPaths.from_project_dir(tmp_path)
+    paths.ensure_base_dirs()
+
+    class DummyFMP:
+        def get_prices(self, *args, **kwargs):
+            return [
+                {
+                    "date": "2026-02-20",
+                    "open": 10.0,
+                    "high": 11.0,
+                    "low": 9.0,
+                    "close": 10.5,
+                    "volume": 1000.0,
+                }
+            ]
+
+        def get_dividends(self, *args, **kwargs):
+            return []
+
+        def get_splits(self, *args, **kwargs):
+            return []
+
+        def get_earnings(self, *args, **kwargs):
+            return []
+
+        def get_earnings_surprises(self, *args, **kwargs):
+            return []
+
+        def get_income_statement(self, *args, **kwargs):
+            return []
+
+        def get_balance_sheet(self, *args, **kwargs):
+            return []
+
+        def get_cash_flow(self, *args, **kwargs):
+            return []
+
+        def get_stock_news(self, *args, **kwargs):
+            raise RuntimeError("stock news unavailable")
+
+        def get_general_news(self, *args, **kwargs):
+            return [
+                {
+                    "title": "General market update",
+                    "date": "2026-02-20 12:00:00",
+                    "content": "macro trend",
+                    "tickers": "NASDAQ:AAPL",
+                    "site": "fmp",
+                }
+            ]
+
+    fmp = DummyFMP()
+    dataset_id, _, _ = update_data(cfg, paths, fmp, force=False)
+    news_path = paths.raw_dir / dataset_id / "news.parquet"
+    assert news_path.exists()
+    news_df = pd.read_parquet(news_path)
+    assert len(news_df) == 1
+    assert news_df.iloc[0]["tickers"] == "NASDAQ:AAPL"
