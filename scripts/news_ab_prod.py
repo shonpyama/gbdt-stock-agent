@@ -20,6 +20,7 @@ if str(SRC_DIR) not in sys.path:
 from gbdt_agent.operations import collect_ops_status, evaluate_ops_gate, load_ops_policy
 from gbdt_agent.orchestrator import run_pipeline
 from gbdt_agent.paths import ProjectPaths
+from gbdt_agent.state import load_run_state, save_last_state
 
 
 def _safe_float(v: Any) -> float:
@@ -141,6 +142,12 @@ def main() -> int:
         reverse=True,
     )
     selected = ranked[0] if ranked else None
+    selected_state_synced = False
+    if selected and selected.get("run_id"):
+        sel_state = load_run_state(paths.state_dir, str(selected["run_id"]))
+        if isinstance(sel_state, dict):
+            save_last_state(paths.state_dir, sel_state)
+            selected_state_synced = True
 
     payload = {
         "base_conf": str(base_conf_path),
@@ -149,6 +156,7 @@ def main() -> int:
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "ranked": ranked,
         "selected": selected,
+        "selected_state_synced": selected_state_synced,
     }
     out_json = out_dir / "news_ab_prod_results.json"
     out_md = out_dir / f"news_ab_prod_{datetime.now(timezone.utc).strftime('%Y%m%d')}.md"
