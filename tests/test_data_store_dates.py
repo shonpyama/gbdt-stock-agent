@@ -202,3 +202,170 @@ def test_update_data_keeps_general_news_when_stock_news_fails(tmp_path: Path) ->
     news_df = pd.read_parquet(news_path)
     assert len(news_df) == 1
     assert news_df.iloc[0]["tickers"] == "NASDAQ:AAPL"
+
+
+def test_update_data_general_news_paginates_until_start_date(tmp_path: Path) -> None:
+    conf_dir = tmp_path / "conf"
+    conf_dir.mkdir(parents=True, exist_ok=True)
+    (conf_dir / "universe_custom.yaml").write_text(yaml.safe_dump({"symbols": ["AAPL"]}, sort_keys=False))
+
+    cfg = {
+        "universe": {
+            "provider": "custom_list",
+            "fallback_small50": {"enabled": False, "symbols": []},
+        },
+        "data": {
+            "start_date": "2026-02-18",
+            "end_date": "2026-02-21",
+            "adjusted_flag": False,
+            "include_news": True,
+            "general_news_page_size": 20,
+            "general_news_max_pages": 10,
+            "endpoints_version": ["prices_eod", "stock_news", "general_news"],
+        },
+    }
+    paths = ProjectPaths.from_project_dir(tmp_path)
+    paths.ensure_base_dirs()
+
+    class DummyFMP:
+        def __init__(self) -> None:
+            self.general_pages: list[int] = []
+
+        def get_prices(self, *args, **kwargs):
+            return [
+                {
+                    "date": "2026-02-20",
+                    "open": 10.0,
+                    "high": 11.0,
+                    "low": 9.0,
+                    "close": 10.5,
+                    "volume": 1000.0,
+                }
+            ]
+
+        def get_dividends(self, *args, **kwargs):
+            return []
+
+        def get_splits(self, *args, **kwargs):
+            return []
+
+        def get_earnings(self, *args, **kwargs):
+            return []
+
+        def get_earnings_surprises(self, *args, **kwargs):
+            return []
+
+        def get_income_statement(self, *args, **kwargs):
+            return []
+
+        def get_balance_sheet(self, *args, **kwargs):
+            return []
+
+        def get_cash_flow(self, *args, **kwargs):
+            return []
+
+        def get_stock_news(self, *args, **kwargs):
+            return []
+
+        def get_general_news(self, *, limit: int = 100, page: int = 0):
+            self.general_pages.append(int(page))
+            pages = {
+                0: [{"title": "t0", "date": "2026-02-21 12:00:00", "tickers": "NASDAQ:AAPL"}],
+                1: [{"title": "t1", "date": "2026-02-19 12:00:00", "tickers": "NASDAQ:AAPL"}],
+                2: [{"title": "t2", "date": "2026-02-18 12:00:00", "tickers": "NASDAQ:AAPL"}],
+                3: [{"title": "t3", "date": "2026-02-17 12:00:00", "tickers": "NASDAQ:AAPL"}],
+            }
+            return pages.get(int(page), [])
+
+    fmp = DummyFMP()
+    dataset_id, _, _ = update_data(cfg, paths, fmp, force=False)
+    news_path = paths.raw_dir / dataset_id / "news.parquet"
+    news_df = pd.read_parquet(news_path)
+
+    assert fmp.general_pages == [0, 1, 2]
+    assert len(news_df) == 3
+    dts = pd.to_datetime(news_df["date"], errors="coerce").dt.date
+    assert dts.min() == date(2026, 2, 18)
+
+
+def test_update_data_general_news_allows_same_date_range_with_different_pages(tmp_path: Path) -> None:
+    conf_dir = tmp_path / "conf"
+    conf_dir.mkdir(parents=True, exist_ok=True)
+    (conf_dir / "universe_custom.yaml").write_text(yaml.safe_dump({"symbols": ["AAPL"]}, sort_keys=False))
+
+    cfg = {
+        "universe": {
+            "provider": "custom_list",
+            "fallback_small50": {"enabled": False, "symbols": []},
+        },
+        "data": {
+            "start_date": "2026-02-19",
+            "end_date": "2026-02-21",
+            "adjusted_flag": False,
+            "include_news": True,
+            "general_news_page_size": 20,
+            "general_news_max_pages": 10,
+            "endpoints_version": ["prices_eod", "stock_news", "general_news"],
+        },
+    }
+    paths = ProjectPaths.from_project_dir(tmp_path)
+    paths.ensure_base_dirs()
+
+    class DummyFMP:
+        def __init__(self) -> None:
+            self.general_pages: list[int] = []
+
+        def get_prices(self, *args, **kwargs):
+            return [
+                {
+                    "date": "2026-02-20",
+                    "open": 10.0,
+                    "high": 11.0,
+                    "low": 9.0,
+                    "close": 10.5,
+                    "volume": 1000.0,
+                }
+            ]
+
+        def get_dividends(self, *args, **kwargs):
+            return []
+
+        def get_splits(self, *args, **kwargs):
+            return []
+
+        def get_earnings(self, *args, **kwargs):
+            return []
+
+        def get_earnings_surprises(self, *args, **kwargs):
+            return []
+
+        def get_income_statement(self, *args, **kwargs):
+            return []
+
+        def get_balance_sheet(self, *args, **kwargs):
+            return []
+
+        def get_cash_flow(self, *args, **kwargs):
+            return []
+
+        def get_stock_news(self, *args, **kwargs):
+            return []
+
+        def get_general_news(self, *, limit: int = 100, page: int = 0):
+            self.general_pages.append(int(page))
+            pages = {
+                0: [{"title": "t0", "date": "2026-02-20 12:00:00", "tickers": "NASDAQ:AAPL"}],
+                1: [{"title": "t1", "date": "2026-02-20 12:00:00", "tickers": "NASDAQ:AAPL"}],
+                2: [{"title": "t2", "date": "2026-02-19 12:00:00", "tickers": "NASDAQ:AAPL"}],
+                3: [],
+            }
+            return pages.get(int(page), [])
+
+    fmp = DummyFMP()
+    dataset_id, _, _ = update_data(cfg, paths, fmp, force=False)
+    news_path = paths.raw_dir / dataset_id / "news.parquet"
+    news_df = pd.read_parquet(news_path)
+
+    assert fmp.general_pages == [0, 1, 2]
+    assert len(news_df) == 3
+    assert set(news_df["title"].astype(str).tolist()) == {"t0", "t1", "t2"}

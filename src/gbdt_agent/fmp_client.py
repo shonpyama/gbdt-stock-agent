@@ -368,12 +368,13 @@ class FMPClient:
             max_attempts=2,
         )
 
-    def get_general_news(self, limit: int = 100) -> Any:
+    def get_general_news(self, limit: int = 100, page: int = 0) -> Any:
         ep = self.endpoint_for("general_news")
         size = max(1, min(int(limit), 200))
+        page_idx = max(0, int(page))
         return self.request(
             ep,
-            params={"page": 0, "size": size},
+            params={"page": page_idx, "size": size},
             endpoint_name="general_news",
             max_attempts=2,
         )

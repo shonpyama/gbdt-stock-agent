@@ -348,13 +348,16 @@ def compute_dataset_id(
 ) -> str:
     dcfg = cfg.get("data", {}) or {}
     ucfg = cfg.get("universe", {}) or {}
+    include_news = bool(dcfg.get("include_news", False))
     spec = {
         "universe_name": str(ucfg.get("name", "sp500_pit")),
         "symbols_hash": symbols_hash(list(symbols)),
         "start_date": str(dcfg.get("start_date")),
         "end_date": str(effective_end_date if effective_end_date is not None else (dcfg.get("end_date") or "")),
         "adjusted_flag": bool(dcfg.get("adjusted_flag", True)),
-        "include_news": bool(dcfg.get("include_news", False)),
+        "include_news": include_news,
+        "general_news_page_size": int(dcfg.get("general_news_page_size", 200)) if include_news else 0,
+        "general_news_max_pages": int(dcfg.get("general_news_max_pages", 1200)) if include_news else 0,
         "endpoints_version": list(dcfg.get("endpoints_version", [])),
         "timezone_assumption": str(cfg.get("run", {}).get("timezone_assumption", "")),
     }
@@ -548,6 +551,16 @@ def update_data(
             rows: List[pd.DataFrame] = []
             stock_failures = 0
             stock_max_failures = 5
+            start_date = _parse_date(start)
+            end_date = _parse_date(end)
+
+            def _news_event_dates(frame: pd.DataFrame) -> pd.Series:
+                for cand in ("publishedDate", "published_date", "date"):
+                    if cand in frame.columns:
+                        ts = pd.to_datetime(frame[cand], errors="coerce", utc=True)
+                        return ts.dt.tz_localize(None).dt.date
+                return pd.Series([pd.NaT] * len(frame), index=frame.index)
+
             for sym in tqdm(symbols, desc="fetch_news"):
                 try:
                     payload = fmp.get_stock_news(sym, limit=50)
@@ -567,13 +580,87 @@ def update_data(
                 df["symbol"] = sym
                 rows.append(df)
             try:
-                gnews = fmp.get_general_news(limit=200)
-                if isinstance(gnews, list) and gnews:
+                page_size = max(1, min(int(dcfg.get("general_news_page_size", 200)), 200))
+                max_pages = max(1, int(dcfg.get("general_news_max_pages", 1200)))
+
+                existing_min_date: Optional[date] = None
+                existing_covers_start = False
+                if not existing.empty:
+                    existing_dates = _news_event_dates(existing)
+                    if existing_dates.notna().any():
+                        existing_min_date = existing_dates.dropna().min()
+                        if start_date is not None and existing_min_date <= start_date:
+                            existing_covers_start = True
+
+                seen_page_markers: set[str] = set()
+                repeated_page_count = 0
+
+                def _general_news_page_marker(frame: pd.DataFrame) -> Optional[str]:
+                    if frame.empty:
+                        return None
+                    marker_cols = [
+                        c
+                        for c in (
+                            "publishedDate",
+                            "published_date",
+                            "date",
+                            "title",
+                            "url",
+                            "link",
+                            "symbol",
+                            "tickers",
+                            "ticker",
+                        )
+                        if c in frame.columns
+                    ]
+                    if not marker_cols:
+                        return None
+                    marker_rows = (
+                        frame[marker_cols]
+                        .fillna("")
+                        .astype(str)
+                        .agg("|".join, axis=1)
+                        .tolist()
+                    )
+                    return sha1_hex("\n".join(marker_rows))
+
+                for page in range(max_pages):
+                    gnews = fmp.get_general_news(limit=page_size, page=page)
+                    if not isinstance(gnews, list) or not gnews:
+                        break
                     gdf = pd.DataFrame(gnews)
+                    if gdf.empty:
+                        break
+                    gdf["_event_date"] = _news_event_dates(gdf)
+                    gdf = gdf[gdf["_event_date"].notna()].copy()
+                    if gdf.empty:
+                        continue
+
+                    oldest = gdf["_event_date"].min()
+                    page_marker = _general_news_page_marker(gdf)
+                    if page_marker in seen_page_markers:
+                        repeated_page_count += 1
+                        # Some tiers return repeated pages for large page ranges; stop after streak.
+                        if repeated_page_count >= 3:
+                            break
+                        continue
+                    repeated_page_count = 0
+                    if page_marker:
+                        seen_page_markers.add(page_marker)
+
+                    if end_date is not None:
+                        gdf = gdf[gdf["_event_date"] <= end_date]
+                    if start_date is not None:
+                        gdf = gdf[gdf["_event_date"] >= start_date]
                     if not gdf.empty:
                         if "symbol" not in gdf.columns:
                             gdf["symbol"] = "GENERAL"
-                        rows.append(gdf)
+                        rows.append(gdf.drop(columns=["_event_date"]))
+
+                    if start_date is not None and oldest <= start_date:
+                        break
+                    if existing_covers_start and existing_min_date is not None and oldest <= existing_min_date:
+                        break
             except Exception as e:
                 logger.warning(f"general_news_fetch_failed: {type(e).__name__}: {e}")
             new = pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
@@ -599,6 +686,8 @@ def update_data(
         "symbols_hash": symbols_hash(symbols),
         "adjusted_flag": bool(dcfg.get("adjusted_flag", True)),
         "include_news": bool(dcfg.get("include_news", False)),
+        "general_news_page_size": int(dcfg.get("general_news_page_size", 200)) if bool(dcfg.get("include_news", False)) else 0,
+        "general_news_max_pages": int(dcfg.get("general_news_max_pages", 1200)) if bool(dcfg.get("include_news", False)) else 0,
         "endpoints_version": list(dcfg.get("endpoints_version", [])),
         "timezone_assumption": str(cfg.get("run", {}).get("timezone_assumption", "")),
     }

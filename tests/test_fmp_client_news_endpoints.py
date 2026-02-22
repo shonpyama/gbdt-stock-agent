@@ -52,3 +52,20 @@ def test_get_general_news_uses_fmp_articles_page_and_size(monkeypatch, tmp_path:
     assert captured["kwargs"]["endpoint_name"] == "general_news"
     assert captured["kwargs"]["max_attempts"] == 2
 
+
+def test_get_general_news_accepts_page_override(monkeypatch, tmp_path: Path) -> None:
+    client = FMPClient(FMPClientConfig(api_key="dummy"), cache_dir=tmp_path)
+    captured = {}
+
+    def _fake_request(endpoint, params=None, **kwargs):  # type: ignore[no-untyped-def]
+        captured["endpoint"] = endpoint
+        captured["params"] = dict(params or {})
+        captured["kwargs"] = kwargs
+        return []
+
+    monkeypatch.setattr(client, "request", _fake_request)
+    client.get_general_news(limit=25, page=7)
+
+    assert captured["endpoint"] == "fmp-articles"
+    assert captured["params"] == {"page": 7, "size": 25}
+    assert captured["kwargs"]["endpoint_name"] == "general_news"

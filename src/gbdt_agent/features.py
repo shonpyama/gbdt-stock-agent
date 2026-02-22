@@ -197,17 +197,33 @@ def _simple_lexicon_sentiment(text: str) -> float:
     return float((pos - neg) / max(1, len(toks)))
 
 
-def _extract_news_symbol(value: Any) -> str:
+def _extract_news_symbols(value: Any) -> List[str]:
     raw = str(value).upper().strip() if value is not None else ""
-    if not raw:
-        return "GENERAL"
-    token = _NEWS_TICKER_SPLIT_RE.split(raw)[0].strip()
-    if ":" in token:
-        token = token.split(":")[-1].strip()
-    token = token.replace("/", "").replace("\\", "").strip()
-    if not token:
-        return "GENERAL"
-    return token if _NEWS_TICKER_RE.match(token) else "GENERAL"
+    if not raw or raw in {"NAN", "NONE"}:
+        return []
+    tokens = _NEWS_TICKER_SPLIT_RE.split(raw.replace("/", " ").replace("\\", " "))
+    out: List[str] = []
+    seen = set()
+    for tok in tokens:
+        token = tok.strip()
+        if not token:
+            continue
+        if ":" in token:
+            token = token.split(":")[-1].strip()
+        if not token or not _NEWS_TICKER_RE.match(token):
+            continue
+        if token in seen:
+            continue
+        out.append(token)
+        seen.add(token)
+    return out
+
+
+def _extract_news_symbol(value: Any) -> str:
+    symbols = _extract_news_symbols(value)
+    if symbols:
+        return symbols[0]
+    return "GENERAL"
 
 
 def _prepare_news_features(
@@ -228,37 +244,17 @@ def _prepare_news_features(
         return pd.DataFrame(columns=cols)
 
     df = news.copy()
-    if "symbol" not in df.columns:
-        if "tickers" in df.columns:
-            df["symbol"] = df["tickers"].map(_extract_news_symbol)
-        elif "ticker" in df.columns:
-            df["symbol"] = df["ticker"].map(_extract_news_symbol)
-        else:
-            df["symbol"] = "GENERAL"
-    elif "tickers" in df.columns:
-        missing_symbol = df["symbol"].isna() | (df["symbol"].astype(str).str.strip() == "")
-        if bool(missing_symbol.any()):
-            df.loc[missing_symbol, "symbol"] = df.loc[missing_symbol, "tickers"].map(_extract_news_symbol)
-    df["symbol"] = (
-        df["symbol"]
-        .fillna("GENERAL")
-        .astype(str)
-        .str.upper()
-        .str.split(",")
-        .str[0]
-        .str.split(":")
-        .str[-1]
-        .str.strip()
-        .replace("", "GENERAL")
-    )
 
     event_ts = None
     for cand in ["publishedDate", "published_date", "date"]:
         if cand in df.columns:
-            event_ts = pd.to_datetime(df[cand], errors="coerce", utc=True)
-            if event_ts.notna().any():
-                break
-    if event_ts is None:
+            ts = pd.to_datetime(df[cand], errors="coerce", utc=True)
+            if event_ts is None:
+                event_ts = ts
+            else:
+                # Keep the first available timestamp per row across known date columns.
+                event_ts = event_ts.fillna(ts)
+    if event_ts is None or not bool(event_ts.notna().any()):
         return pd.DataFrame(columns=cols)
 
     df["event_date"] = event_ts.dt.tz_localize(None).dt.date
@@ -292,8 +288,46 @@ def _prepare_news_features(
 
     df["decision_date"] = (pd.to_datetime(df["event_date"]) + BDay(int(event_safe_shift_days))).dt.date
 
+    # Build symbol-level assignments with fallback order:
+    # symbol -> tickers -> ticker -> GENERAL.
+    symbol_lists = pd.Series([[] for _ in range(len(df))], index=df.index, dtype=object)
+    if "symbol" in df.columns:
+        symbol_lists = df["symbol"].map(_extract_news_symbols)
+    if "tickers" in df.columns:
+        tickers_lists = df["tickers"].map(_extract_news_symbols)
+        symbol_lists = pd.Series(
+            [s if len(s) > 0 else t for s, t in zip(symbol_lists.tolist(), tickers_lists.tolist())],
+            index=df.index,
+            dtype=object,
+        )
+    if "ticker" in df.columns:
+        ticker_lists = df["ticker"].map(_extract_news_symbols)
+        symbol_lists = pd.Series(
+            [s if len(s) > 0 else t for s, t in zip(symbol_lists.tolist(), ticker_lists.tolist())],
+            index=df.index,
+            dtype=object,
+        )
+    df["symbol_list"] = symbol_lists.map(lambda xs: xs if xs else ["GENERAL"])
+
+    per_market = (
+        df.groupby(["decision_date"], as_index=False)
+        .agg(
+            mkt_news_count_1d=("decision_date", "size"),
+            mkt_news_sent_mean_1d=("news_sentiment", "mean"),
+        )
+        .reset_index(drop=True)
+    )
+
+    symbol_df = (
+        df[["decision_date", "symbol_list", "news_sentiment", "news_source"]]
+        .explode("symbol_list")
+        .rename(columns={"symbol_list": "symbol"})
+        .reset_index(drop=True)
+    )
+    symbol_df["symbol"] = symbol_df["symbol"].fillna("GENERAL").astype(str).str.upper().str.strip().replace("", "GENERAL")
+
     per_symbol = (
-        df.groupby(["decision_date", "symbol"], as_index=False)
+        symbol_df.groupby(["decision_date", "symbol"], as_index=False)
         .agg(
             news_count_1d=("symbol", "size"),
             news_sent_mean_1d=("news_sentiment", "mean"),
@@ -301,16 +335,7 @@ def _prepare_news_features(
         )
         .reset_index(drop=True)
     )
-    per_market = (
-        df.groupby(["decision_date"], as_index=False)
-        .agg(
-            mkt_news_count_1d=("symbol", "size"),
-            mkt_news_sent_mean_1d=("news_sentiment", "mean"),
-        )
-        .reset_index(drop=True)
-    )
     out = per_symbol.merge(per_market, on="decision_date", how="left")
-    out = out[out["symbol"] != "GENERAL"].reset_index(drop=True)
     return out[cols]
 
 
@@ -353,7 +378,23 @@ def build_feature_store(
     if news is not None:
         n_feats = _prepare_news_features(news, event_safe_shift_days=event_safe_shift_days)
         if not n_feats.empty:
-            feats = feats.merge(n_feats, on=["decision_date", "symbol"], how="left")
+            sym_cols = [
+                "news_count_1d",
+                "news_sent_mean_1d",
+                "news_source_nuniq_1d",
+            ]
+            mkt_cols = [
+                "mkt_news_count_1d",
+                "mkt_news_sent_mean_1d",
+            ]
+            sym_df = n_feats[n_feats["symbol"] != "GENERAL"][["decision_date", "symbol"] + sym_cols].copy()
+            if not sym_df.empty:
+                sym_df = sym_df.drop_duplicates(subset=["decision_date", "symbol"], keep="last")
+                feats = feats.merge(sym_df, on=["decision_date", "symbol"], how="left")
+
+            mkt_df = n_feats[["decision_date"] + mkt_cols].drop_duplicates(subset=["decision_date"], keep="last")
+            if not mkt_df.empty:
+                feats = feats.merge(mkt_df, on="decision_date", how="left")
 
         base_cols = [
             "news_count_1d",
