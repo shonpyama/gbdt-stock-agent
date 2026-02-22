@@ -49,16 +49,22 @@ python -m gbdt_agent.cli run --conf conf/default.yaml --resume
 - 一括運用（preflight→run→report→snapshot→sync）: `scripts/ops_autopilot.sh`
 - モデル安定性検証（本番3期間）: `python scripts/model_stability_prod.py --base-conf conf/default.yaml --promote-default`
 - 特徴量安定性検証（本番3期間）: `python scripts/feature_stability_prod.py --base-conf conf/default.yaml --promote-default`
+- 実務 readiness 判定: `python scripts/prod_readiness_check.py --model-results reports/model_stability_prod_results.json --feature-results reports/feature_stability_prod_results.json --strict`
 - 候補分割で並列実行（multi-agent）する場合:
   - 例1: `python scripts/model_stability_prod.py --only-candidates baseline_auto --out-json reports/model_stability_agent1.json --out-md reports/model_stability_agent1.md`
   - 例2: `python scripts/model_stability_prod.py --only-candidates compact_31 --out-json reports/model_stability_agent2.json --out-md reports/model_stability_agent2.md`
   - 例3: `python scripts/feature_stability_prod.py --only-candidates baseline_current --out-json reports/feature_stability_agent1.json --out-md reports/feature_stability_agent1.md`
-  - マージ（モデル）: `python scripts/stability_merge.py --inputs reports/model_stability_agent1.json,reports/model_stability_agent2.json --out-json reports/model_stability_merged.json --out-md reports/model_stability_merged.md`
-  - 採用反映（モデル）: `python scripts/promote_stability_model.py --results reports/model_stability_merged.json`
-  - マージ（特徴量）: `python scripts/stability_merge.py --inputs reports/feature_stability_agent1.json,reports/feature_stability_agent2.json --out-json reports/feature_stability_merged.json --out-md reports/feature_stability_merged.md`
-  - 採用反映（特徴量）: `python scripts/promote_stability_feature.py --results reports/feature_stability_merged.json`
+- マージ（モデル）: `python scripts/stability_merge.py --inputs reports/model_stability_agent1.json,reports/model_stability_agent2.json --out-json reports/model_stability_merged.json --out-md reports/model_stability_merged.md`
+- 採用反映（モデル）: `python scripts/promote_stability_model.py --results reports/model_stability_merged.json`
+- マージ（特徴量）: `python scripts/stability_merge.py --inputs reports/feature_stability_agent1.json,reports/feature_stability_agent2.json --out-json reports/feature_stability_merged.json --out-md reports/feature_stability_merged.md`
+- 採用反映（特徴量）: `python scripts/promote_stability_feature.py --results reports/feature_stability_merged.json`
+- ローカル並列（worktree分離で同時実行）:
+  - モデル: `python scripts/stability_multiagent.py --mode model --end-dates 2025-12-31,2026-01-31,2026-02-21 --promote-default`
+  - 特徴量: `python scripts/stability_multiagent.py --mode feature --end-dates 2025-12-31,2026-01-31,2026-02-21 --promote-default`
 - 安定性検証込み一括運用:
   - `RUN_MODEL_STABILITY=1 RUN_FEATURE_STABILITY=1 scripts/ops_autopilot.sh`
+- readinessまで一括判定:
+  - `RUN_MODEL_STABILITY=1 RUN_FEATURE_STABILITY=1 RUN_READINESS_CHECK=1 scripts/ops_autopilot.sh`
 - 運用ゲート（品質/鮮度の合否判定）: `python -m gbdt_agent.cli ops-gate --policy conf/ops_policy.yaml`
 - 閾値は `conf/ops_policy.yaml` で調整できます。ゲートNG時は `reports/ops_incident_*.md` と `logs/ops/` に記録されます。
 - `colab sync` は `reports/` を含めて同期するため、差分・レビュー・運用記録もDriveへ保存されます。

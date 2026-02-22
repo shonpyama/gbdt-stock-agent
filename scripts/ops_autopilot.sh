@@ -10,6 +10,11 @@ MAX_AGE_HOURS="${MAX_AGE_HOURS:-72}"
 OPS_POLICY="${OPS_POLICY:-conf/ops_policy.yaml}"
 RUN_MODEL_STABILITY="${RUN_MODEL_STABILITY:-0}"
 RUN_FEATURE_STABILITY="${RUN_FEATURE_STABILITY:-0}"
+RUN_READINESS_CHECK="${RUN_READINESS_CHECK:-0}"
+READINESS_MODEL_RESULTS="${READINESS_MODEL_RESULTS:-reports/model_stability_prod_results.json}"
+READINESS_FEATURE_RESULTS="${READINESS_FEATURE_RESULTS:-reports/feature_stability_prod_results.json}"
+READINESS_REQUIRED_PERIODS="${READINESS_REQUIRED_PERIODS:-3}"
+READINESS_MAX_STABILITY_AGE_HOURS="${READINESS_MAX_STABILITY_AGE_HOURS:-168}"
 
 export PYTHONPATH="${ROOT_DIR}/src:${PYTHONPATH:-}"
 
@@ -33,6 +38,18 @@ GATE_RC=0
 python -m gbdt_agent.cli ops-gate --run-id "${RUN_ID}" --policy "${OPS_POLICY}" || GATE_RC=$?
 python -m gbdt_agent.cli colab sync --drive-path "${DRIVE_PATH}"
 
+READINESS_RC=0
+if [[ "${RUN_READINESS_CHECK}" == "1" ]]; then
+  python scripts/prod_readiness_check.py \
+    --project-dir "${ROOT_DIR}" \
+    --policy "${OPS_POLICY}" \
+    --model-results "${READINESS_MODEL_RESULTS}" \
+    --feature-results "${READINESS_FEATURE_RESULTS}" \
+    --required-periods "${READINESS_REQUIRED_PERIODS}" \
+    --max-stability-age-hours "${READINESS_MAX_STABILITY_AGE_HOURS}" \
+    --strict || READINESS_RC=$?
+fi
+
 FINAL_RC=0
 if [[ "${SNAPSHOT_RC}" -ne 0 ]]; then
   FINAL_RC="${SNAPSHOT_RC}"
@@ -40,6 +57,9 @@ fi
 if [[ "${GATE_RC}" -ne 0 ]]; then
   FINAL_RC="${GATE_RC}"
 fi
+if [[ "${READINESS_RC}" -ne 0 ]]; then
+  FINAL_RC="${READINESS_RC}"
+fi
 
-echo "ops_autopilot_done run_id=${RUN_ID} snapshot_rc=${SNAPSHOT_RC} gate_rc=${GATE_RC} model_stability=${RUN_MODEL_STABILITY} feature_stability=${RUN_FEATURE_STABILITY}"
+echo "ops_autopilot_done run_id=${RUN_ID} snapshot_rc=${SNAPSHOT_RC} gate_rc=${GATE_RC} readiness_rc=${READINESS_RC} model_stability=${RUN_MODEL_STABILITY} feature_stability=${RUN_FEATURE_STABILITY} readiness_check=${RUN_READINESS_CHECK}"
 exit "${FINAL_RC}"

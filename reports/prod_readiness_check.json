@@ -1,0 +1,200 @@
+{
+  "generated_at": "2026-02-22T01:30:20.952524+00:00",
+  "readiness_score": 100.0,
+  "readiness_100": true,
+  "checks": {
+    "model_stability": true,
+    "feature_stability": true,
+    "ops_gate": true,
+    "default_conf_alignment": true
+  },
+  "model_detail": {
+    "has_selected": true,
+    "all_periods_gate_pass": true,
+    "periods": 3,
+    "required_periods": 3,
+    "generated_at": "2026-02-22T00:42:20.123693+00:00",
+    "age_hours": 0.8,
+    "max_age_hours": 168.0,
+    "fresh": true,
+    "selected": {
+      "name": "compact_31",
+      "params": {
+        "n_estimators": 1500,
+        "learning_rate": 0.05,
+        "num_leaves": 31,
+        "subsample": 0.9,
+        "colsample_bytree": 0.8,
+        "min_child_samples": 20
+      },
+      "periods": 3,
+      "gate_pass_periods": 3,
+      "all_periods_gate_pass": true,
+      "score_mean": 34.02030525452115,
+      "score_min": 29.095079030378983,
+      "rank_ic_mean": 0.08973324555357094,
+      "sharpe_mean": 17.063309547907604,
+      "total_return_mean": 66.20169121648195,
+      "max_drawdown_mean": -0.13343505755514698
+    }
+  },
+  "feature_detail": {
+    "has_selected": true,
+    "all_periods_gate_pass": true,
+    "periods": 3,
+    "required_periods": 3,
+    "generated_at": "2026-02-22T01:29:54.784817+00:00",
+    "age_hours": 0.007,
+    "max_age_hours": 168.0,
+    "fresh": true,
+    "selected": {
+      "name": "baseline_current",
+      "lookbacks": [
+        1,
+        5,
+        20,
+        60,
+        120
+      ],
+      "event_shift": 1,
+      "periods": 3,
+      "gate_pass_periods": 3,
+      "all_periods_gate_pass": true,
+      "score_mean": 21.096182615939554,
+      "score_min": 16.719322884428575,
+      "rank_ic_mean": 0.05301766087253341,
+      "sharpe_mean": 11.660525338141118,
+      "total_return_mean": 33.647578782847866,
+      "max_drawdown_mean": -0.2352365084190463
+    }
+  },
+  "ops_gate_ok": true,
+  "ops_gate": {
+    "ok": true,
+    "run_id": "20260222_012810Z_7bbb0df1_cfbce2bd",
+    "checked_at": "2026-02-22T01:30:20.952505+00:00",
+    "policy": {
+      "max_age_hours": 72,
+      "require_gpu": true,
+      "require_validation_passed": true,
+      "require_leakage_passed": true,
+      "thresholds": {
+        "min_sharpe": 0.5,
+        "min_total_return": -0.25,
+        "min_max_drawdown": -0.45,
+        "max_avg_cost": 0.03
+      }
+    },
+    "checks": {
+      "state_exists": true,
+      "run_id_present": true,
+      "metrics_exists": true,
+      "report_exists": true,
+      "stage_80_ready": true,
+      "status_success": true,
+      "active_errors_empty": true,
+      "updated_recent": true,
+      "gpu_accelerator": true,
+      "validation_passed": true,
+      "leakage_passed": true,
+      "min_sharpe": true,
+      "min_total_return": true,
+      "min_max_drawdown": true,
+      "max_avg_cost": true
+    },
+    "violations": [],
+    "status_payload": {
+      "ok": true,
+      "run_id": "20260222_012810Z_7bbb0df1_cfbce2bd",
+      "stage": "stage_80_report_ready",
+      "status": "success",
+      "updated_at": "2026-02-22T01:29:54.589683+00:00",
+      "age_hours": 0.007,
+      "max_age_hours": 72.0,
+      "require_gpu": true,
+      "accelerator": "gpu",
+      "last_data_date": "2026-02-20",
+      "validation_passed": true,
+      "leakage_passed": true,
+      "backtest_summary": {
+        "sharpe": 18.122059423476838,
+        "max_drawdown": -0.2335223042213207,
+        "total_return": 78.74253653835335,
+        "avg_turnover": 0.16991735537190086,
+        "avg_cost": 3.4455349404335984e-05,
+        "days": 121
+      },
+      "active_error_count": 0,
+      "historical_error_count": 0,
+      "checks": {
+        "state_exists": true,
+        "run_id_present": true,
+        "metrics_exists": true,
+        "report_exists": true,
+        "stage_80_ready": true,
+        "status_success": true,
+        "active_errors_empty": true,
+        "updated_recent": true,
+        "gpu_accelerator": true
+      },
+      "signals": {
+        "latest_transition_report_exists": true,
+        "ops_snapshot_exists": true
+      },
+      "paths": {
+        "project_dir": "/content/gbdt-stock-agent",
+        "state": "/content/gbdt-stock-agent/state/last_run_state.json",
+        "metrics": "/content/gbdt-stock-agent/artifacts/runs/20260222_012810Z_7bbb0df1_cfbce2bd/metrics.json",
+        "report": "/content/gbdt-stock-agent/artifacts/runs/20260222_012810Z_7bbb0df1_cfbce2bd/report.md",
+        "manifest": "/content/gbdt-stock-agent/artifacts/runs/20260222_012810Z_7bbb0df1_cfbce2bd/artifact_manifest.json"
+      }
+    }
+  },
+  "default_alignment": {
+    "model_params_match": true,
+    "feature_lookbacks_match": true,
+    "feature_shift_match": true,
+    "actual_model_params": {
+      "n_estimators": 1500,
+      "learning_rate": 0.05,
+      "num_leaves": 31,
+      "subsample": 0.9,
+      "colsample_bytree": 0.8,
+      "min_child_samples": 20
+    },
+    "expected_model_params": {
+      "n_estimators": 1500,
+      "learning_rate": 0.05,
+      "num_leaves": 31,
+      "subsample": 0.9,
+      "colsample_bytree": 0.8,
+      "min_child_samples": 20
+    },
+    "actual_feature_lookbacks": [
+      1,
+      5,
+      20,
+      60,
+      120
+    ],
+    "expected_feature_lookbacks": [
+      1,
+      5,
+      20,
+      60,
+      120
+    ],
+    "actual_feature_shift": 1,
+    "expected_feature_shift": 1
+  },
+  "inputs": {
+    "project_dir": "/content/gbdt-stock-agent",
+    "default_conf": "/content/gbdt-stock-agent/conf/default.yaml",
+    "policy": "/content/gbdt-stock-agent/conf/ops_policy.yaml",
+    "model_results": "/content/gbdt-stock-agent/reports/model_stability_prod_results.json",
+    "feature_results": "/content/gbdt-stock-agent/reports/feature_stability_prod_results.json",
+    "required_periods": 3,
+    "max_stability_age_hours": 168.0,
+    "run_id": null
+  }
+}

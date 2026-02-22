@@ -68,6 +68,19 @@ def _resolve_conf_path(base: str) -> Path:
     return PROJECT_DIR / path
 
 
+def _dedup_candidates(candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    # Avoid duplicated runs when baseline feature config equals an explicit candidate.
+    seen: set[tuple[tuple[int, ...], int]] = set()
+    out: List[Dict[str, Any]] = []
+    for c in candidates:
+        key = (tuple(int(x) for x in (c.get("lookbacks") or [])), int(c.get("event_shift") or 1))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(c)
+    return out
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run multi-period feature stability validation for production.")
     parser.add_argument("--base-conf", default="conf/default.yaml", help="Base config path used as a template.")
@@ -103,6 +116,7 @@ def main() -> int:
         {"name": "lb_1_5_20_60_120", "lookbacks": [1, 5, 20, 60, 120], "event_shift": 1},
         {"name": "lb_1_5_20_60_120_shift2", "lookbacks": [1, 5, 20, 60, 120], "event_shift": 2},
     ]
+    candidates = _dedup_candidates(candidates)
     only_raw = str(args.only_candidates or "").strip()
     if only_raw:
         allow = {x.strip() for x in only_raw.split(",") if x.strip()}
