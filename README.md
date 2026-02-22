@@ -53,6 +53,10 @@ python -m gbdt_agent.cli run --conf conf/default.yaml --resume
   - 例1: `python scripts/model_stability_prod.py --only-candidates baseline_auto --out-json reports/model_stability_agent1.json --out-md reports/model_stability_agent1.md`
   - 例2: `python scripts/model_stability_prod.py --only-candidates compact_31 --out-json reports/model_stability_agent2.json --out-md reports/model_stability_agent2.md`
   - 例3: `python scripts/feature_stability_prod.py --only-candidates baseline_current --out-json reports/feature_stability_agent1.json --out-md reports/feature_stability_agent1.md`
+  - マージ（モデル）: `python scripts/stability_merge.py --inputs reports/model_stability_agent1.json,reports/model_stability_agent2.json --out-json reports/model_stability_merged.json --out-md reports/model_stability_merged.md`
+  - 採用反映（モデル）: `python scripts/promote_stability_model.py --results reports/model_stability_merged.json`
+  - マージ（特徴量）: `python scripts/stability_merge.py --inputs reports/feature_stability_agent1.json,reports/feature_stability_agent2.json --out-json reports/feature_stability_merged.json --out-md reports/feature_stability_merged.md`
+  - 採用反映（特徴量）: `python scripts/promote_stability_feature.py --results reports/feature_stability_merged.json`
 - 安定性検証込み一括運用:
   - `RUN_MODEL_STABILITY=1 RUN_FEATURE_STABILITY=1 scripts/ops_autopilot.sh`
 - 運用ゲート（品質/鮮度の合否判定）: `python -m gbdt_agent.cli ops-gate --policy conf/ops_policy.yaml`
