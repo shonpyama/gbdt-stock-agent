@@ -6,6 +6,7 @@ cd "${ROOT_DIR}"
 
 CONF_PATH="${CONF_PATH:-conf/default.yaml}"
 DRIVE_PATH="${DRIVE_PATH:-/content/drive/MyDrive/gbdt-stock-agent}"
+SYNC_MODE="${SYNC_MODE:-quick}"
 MAX_AGE_HOURS="${MAX_AGE_HOURS:-72}"
 OPS_POLICY="${OPS_POLICY:-conf/ops_policy.yaml}"
 RUN_MODEL_STABILITY="${RUN_MODEL_STABILITY:-0}"
@@ -36,7 +37,7 @@ python -m gbdt_agent.cli ops-snapshot --run-id "${RUN_ID}" --max-age-hours "${MA
 
 GATE_RC=0
 python -m gbdt_agent.cli ops-gate --run-id "${RUN_ID}" --policy "${OPS_POLICY}" || GATE_RC=$?
-python -m gbdt_agent.cli colab sync --drive-path "${DRIVE_PATH}"
+python -m gbdt_agent.cli colab sync --drive-path "${DRIVE_PATH}" --mode "${SYNC_MODE}" --run-id "${RUN_ID}"
 
 READINESS_RC=0
 if [[ "${RUN_READINESS_CHECK}" == "1" ]]; then

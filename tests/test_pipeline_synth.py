@@ -219,7 +219,7 @@ def test_pipeline_fails_on_deliberate_leak(monkeypatch, tmp_path: Path) -> None:
         out_dir,
     ):
         px = prices.copy()
-        px["date"] = pd.to_datetime(px["date"]).dt.date
+        px["date"] = px["date"].map(lambda x: x.date() if hasattr(x, "date") else pd.to_datetime(x).date())
         px = px.sort_values(["symbol", "date"])
         px["leak_feature"] = px.groupby("symbol")["close"].shift(-1) / px["close"] - 1.0
         feats = px.rename(columns={"date": "decision_date"})[["decision_date", "symbol", "leak_feature"]].dropna().copy()
@@ -319,8 +319,8 @@ def test_pipeline_stage_checkpoint_sync_writes_log(monkeypatch, tmp_path: Path) 
 
     calls = []
 
-    def fake_sync_runtime_to_drive(local_root=None, drive_path=None):
-        calls.append((str(local_root), str(drive_path)))
+    def fake_sync_runtime_to_drive(local_root=None, drive_path=None, mode="full", run_id=None):
+        calls.append((str(local_root), str(drive_path), str(mode), str(run_id)))
         return {
             "direction": "local_to_drive",
             "copied_files": 1,
@@ -344,3 +344,53 @@ def test_pipeline_stage_checkpoint_sync_writes_log(monkeypatch, tmp_path: Path) 
     assert log_path.exists()
     text = log_path.read_text()
     assert "stage_20_validation_passed" in text
+
+
+def test_pipeline_stage80_sync_has_auto_review(monkeypatch, tmp_path: Path) -> None:
+    project_dir = tmp_path / "qp_proj_checkpoint_sync_stage80"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    conf = _make_conf(project_dir)
+    conf_path = project_dir / "conf.yaml"
+    conf_path.write_text(yaml.safe_dump(conf, sort_keys=False))
+    _install_fakes(monkeypatch, project_dir)
+
+    drive_path = tmp_path / "drive"
+    monkeypatch.setenv("GBDT_CHECKPOINT_DRIVE_PATH", str(drive_path))
+
+    calls = []
+
+    def fake_sync_runtime_to_drive(local_root=None, drive_path=None, mode="full", run_id=None):
+        root = Path(local_root)
+        stage = ""
+        rid = str(run_id or "")
+        state_path = root / "state" / "last_run_state.json"
+        if state_path.exists():
+            state = json.loads(state_path.read_text())
+            stage = str(state.get("stage") or "")
+            rid = rid or str(state.get("run_id") or "")
+        auto_review_exists = False
+        if rid:
+            auto_review_exists = (root / "artifacts" / "runs" / rid / "auto_review.json").exists()
+        calls.append({"stage": stage, "run_id": rid, "auto_review_exists": auto_review_exists, "mode": str(mode)})
+        return {
+            "direction": "local_to_drive",
+            "copied_files": 1,
+            "local_root": str(local_root),
+            "drive_path": str(drive_path),
+        }
+
+    import gbdt_agent.colab as colab_mod
+
+    monkeypatch.setattr(colab_mod, "sync_runtime_to_drive", fake_sync_runtime_to_drive)
+
+    run_id = rexp.run_pipeline(
+        project_dir=project_dir,
+        conf_path=conf_path,
+        resume=False,
+        force_unlock=True,
+    )
+    assert run_id
+    assert any(
+        c.get("stage") == "stage_80_report_ready" and bool(c.get("auto_review_exists"))
+        for c in calls
+    )

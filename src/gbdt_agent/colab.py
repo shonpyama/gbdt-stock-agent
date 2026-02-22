@@ -6,8 +6,10 @@ import atexit
 import hashlib
 import importlib.util
 import os
+import re
 import shutil
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Optional
@@ -23,9 +25,18 @@ SYNC_DIRS = (
     "logs",
     "reports",
 )
+SYNC_DIRS_QUICK = (
+    "state",
+    "reports",
+    "logs",
+)
 CONTENT_CHECK_SUFFIXES = {".json", ".md", ".txt", ".log", ".yaml", ".yml"}
 CONTENT_CHECK_BASENAMES = {"last_run_state.json", "lock.json", "metrics.json", "report.md", "artifact_manifest.json"}
 CONTENT_CHECK_SKIP_PARTS = {"cache_http"}
+SYNC_LOCK_FILE = ".colab_sync.lock"
+SYNC_LOCK_STALE_SECONDS = 4 * 60 * 60
+SYNC_LOCK_WAIT_SECONDS = 60.0
+SYNC_LOCK_POLL_SECONDS = 0.5
 
 
 def is_colab() -> bool:
@@ -89,38 +100,212 @@ def _sync_tree(src_root: Path, dst_root: Path) -> int:
     return copied
 
 
-def restore_runtime_from_drive(local_root: Optional[Path] = None, drive_path: Optional[Path] = None) -> Dict[str, object]:
+def _read_last_run_id(root: Path) -> Optional[str]:
+    p = root / "state" / "last_run_state.json"
+    if not p.exists():
+        return None
+    try:
+        import json
+
+        payload = json.loads(p.read_text())
+        rid = str(payload.get("run_id") or "").strip()
+        if re.match(r"^[0-9]{8}_[0-9]{6}Z_[0-9a-f]{8,}_[0-9a-f]{8,}$", rid):
+            return rid
+    except Exception:
+        return None
+    return None
+
+
+def _resolve_sync_dirs(*, mode: str, run_id: Optional[str], source_root: Path) -> tuple[str, ...]:
+    m = str(mode or "full").strip().lower()
+    if m not in {"full", "quick"}:
+        m = "full"
+    if m == "full":
+        return SYNC_DIRS
+    rid = ""
+    run_id_raw = str(run_id or "").strip()
+    if run_id_raw:
+        rid = _sanitize_run_id(run_id_raw)
+    else:
+        rid = _read_last_run_id(source_root) or ""
+    out = list(SYNC_DIRS_QUICK)
+    if rid:
+        out.append(f"artifacts/runs/{rid}")
+    return tuple(out)
+
+
+def _sanitize_run_id(run_id: str) -> str:
+    rid = str(run_id).strip()
+    if not rid:
+        return ""
+    if ".." in rid or "/" in rid or "\\" in rid:
+        raise ValueError(f"Invalid run_id: {run_id}")
+    if not re.match(r"^[A-Za-z0-9._-]+$", rid):
+        raise ValueError(f"Invalid run_id: {run_id}")
+    return rid
+
+
+def _ensure_drive_cache_link(*, local_root: Path, drive_path: Path) -> Dict[str, object]:
+    local_cache = local_root / "data" / "cache_http"
+    drive_cache = drive_path / "data" / "cache_http"
+    drive_cache.mkdir(parents=True, exist_ok=True)
+    local_cache.parent.mkdir(parents=True, exist_ok=True)
+
+    if local_cache.is_symlink():
+        try:
+            if local_cache.resolve() == drive_cache.resolve():
+                return {"cache_linked": True, "cache_link_reason": "already_linked"}
+        except Exception:
+            pass
+
+    backup_path: Optional[Path] = None
+    try:
+        if local_cache.exists() and local_cache.is_dir():
+            # One-time seed into Drive cache.
+            _sync_tree(local_cache, drive_cache)
+            backup_path = local_cache.parent / f".cache_http_backup_{os.getpid()}_{int(time.time())}"
+            local_cache.rename(backup_path)
+        elif local_cache.exists():
+            backup_path = local_cache.parent / f".cache_http_backup_{os.getpid()}_{int(time.time())}"
+            local_cache.rename(backup_path)
+
+        os.symlink(str(drive_cache), str(local_cache), target_is_directory=True)
+
+        if backup_path and backup_path.exists():
+            if backup_path.is_dir():
+                shutil.rmtree(backup_path)
+            else:
+                backup_path.unlink()
+        return {"cache_linked": True, "cache_link_reason": "linked_to_drive"}
+    except Exception as exc:
+        # Roll back to local cache if link creation failed.
+        try:
+            if local_cache.is_symlink() or local_cache.exists():
+                if local_cache.is_dir() and not local_cache.is_symlink():
+                    shutil.rmtree(local_cache)
+                else:
+                    local_cache.unlink()
+            if backup_path and backup_path.exists():
+                backup_path.rename(local_cache)
+        except Exception:
+            pass
+        return {"cache_linked": False, "cache_link_reason": f"{type(exc).__name__}: {exc}"}
+
+
+class _SyncLock:
+    def __init__(self, drive_path: Path):
+        self.lock_path = drive_path / SYNC_LOCK_FILE
+        self.acquired = False
+
+    def _prune_stale(self) -> None:
+        self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        if self.lock_path.exists():
+            try:
+                age = max(0.0, time.time() - self.lock_path.stat().st_mtime)
+                if age > float(SYNC_LOCK_STALE_SECONDS):
+                    self.lock_path.unlink(missing_ok=True)  # type: ignore[arg-type]
+            except Exception:
+                pass
+
+    def acquire(self, *, wait_seconds: float = SYNC_LOCK_WAIT_SECONDS) -> None:
+        deadline = time.time() + max(0.0, float(wait_seconds))
+        while True:
+            self._prune_stale()
+            try:
+                fd = os.open(str(self.lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                try:
+                    os.write(fd, f"{os.getpid()} {time.time()}".encode("utf-8"))
+                finally:
+                    os.close(fd)
+                self.acquired = True
+                return
+            except FileExistsError:
+                if time.time() >= deadline:
+                    raise TimeoutError(f"sync lock timeout: {self.lock_path}")
+                time.sleep(float(SYNC_LOCK_POLL_SECONDS))
+
+    def release(self) -> None:
+        if not self.acquired:
+            return
+        try:
+            self.lock_path.unlink(missing_ok=True)  # type: ignore[arg-type]
+        except Exception:
+            pass
+        self.acquired = False
+
+
+def restore_runtime_from_drive(
+    local_root: Optional[Path] = None,
+    drive_path: Optional[Path] = None,
+    *,
+    mode: str = "full",
+    run_id: Optional[str] = None,
+) -> Dict[str, object]:
     local_root = local_root or Path.cwd()
     drive_path = drive_path or DEFAULT_DRIVE_PATH
     local_root.mkdir(parents=True, exist_ok=True)
     drive_path.mkdir(parents=True, exist_ok=True)
 
+    lock = _SyncLock(drive_path)
+    lock.acquire()
+    cache_info = _ensure_drive_cache_link(local_root=local_root, drive_path=drive_path)
     copied = 0
-    for rel in SYNC_DIRS:
-        copied += _sync_tree(drive_path / rel, local_root / rel)
-    return {
-        "direction": "drive_to_local",
-        "copied_files": copied,
-        "local_root": str(local_root),
-        "drive_path": str(drive_path),
-    }
+    try:
+        rel_dirs = _resolve_sync_dirs(mode=mode, run_id=run_id, source_root=drive_path)
+        for rel in rel_dirs:
+            if str(rel) == "data/cache_http":
+                continue
+            copied += _sync_tree(drive_path / rel, local_root / rel)
+        out = {
+            "direction": "drive_to_local",
+            "mode": str(mode),
+            "run_id": str(run_id or ""),
+            "copied_files": copied,
+            "local_root": str(local_root),
+            "drive_path": str(drive_path),
+            "sync_dirs": list(rel_dirs),
+        }
+        out.update(cache_info)
+        return out
+    finally:
+        lock.release()
 
 
-def sync_runtime_to_drive(local_root: Optional[Path] = None, drive_path: Optional[Path] = None) -> Dict[str, object]:
+def sync_runtime_to_drive(
+    local_root: Optional[Path] = None,
+    drive_path: Optional[Path] = None,
+    *,
+    mode: str = "full",
+    run_id: Optional[str] = None,
+) -> Dict[str, object]:
     local_root = local_root or Path.cwd()
     drive_path = drive_path or DEFAULT_DRIVE_PATH
     local_root.mkdir(parents=True, exist_ok=True)
     drive_path.mkdir(parents=True, exist_ok=True)
 
+    lock = _SyncLock(drive_path)
+    lock.acquire()
+    cache_info = _ensure_drive_cache_link(local_root=local_root, drive_path=drive_path)
     copied = 0
-    for rel in SYNC_DIRS:
-        copied += _sync_tree(local_root / rel, drive_path / rel)
-    return {
-        "direction": "local_to_drive",
-        "copied_files": copied,
-        "local_root": str(local_root),
-        "drive_path": str(drive_path),
-    }
+    try:
+        rel_dirs = _resolve_sync_dirs(mode=mode, run_id=run_id, source_root=local_root)
+        for rel in rel_dirs:
+            if str(rel) == "data/cache_http":
+                continue
+            copied += _sync_tree(local_root / rel, drive_path / rel)
+        out = {
+            "direction": "local_to_drive",
+            "mode": str(mode),
+            "run_id": str(run_id or ""),
+            "copied_files": copied,
+            "local_root": str(local_root),
+            "drive_path": str(drive_path),
+            "sync_dirs": list(rel_dirs),
+        }
+        out.update(cache_info)
+        return out
+    finally:
+        lock.release()
 
 
 def _sha1_file(path: Path) -> str:

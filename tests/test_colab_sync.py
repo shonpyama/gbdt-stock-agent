@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -22,14 +25,16 @@ def test_local_drive_sync_roundtrip(tmp_path: Path) -> None:
     (local_root / "reports" / "r.md").write_text("# report")
 
     sync_stats = sync_runtime_to_drive(local_root=local_root, drive_path=drive_root)
-    assert sync_stats["copied_files"] >= 3
+    assert sync_stats["copied_files"] >= 2
+    assert (drive_root / "data" / "cache_http" / "x.json").exists()
 
-    # remove local and restore from drive
-    (local_root / "data" / "cache_http" / "x.json").unlink()
-    (local_root / "reports" / "r.md").unlink()
+    # remove local runtime and restore from drive
+    shutil.rmtree(local_root)
+    local_root.mkdir(parents=True, exist_ok=True)
     restore_stats = restore_runtime_from_drive(local_root=local_root, drive_path=drive_root)
-    assert restore_stats["copied_files"] >= 2
+    assert restore_stats["copied_files"] >= 1
     assert (local_root / "data" / "cache_http" / "x.json").exists()
+    assert (local_root / "data" / "cache_http").is_symlink()
     assert (local_root / "reports" / "r.md").exists()
 
 
@@ -51,3 +56,13 @@ def test_sync_copies_changed_metadata_even_if_size_and_mtime_match(tmp_path: Pat
     stats = sync_runtime_to_drive(local_root=local_root, drive_path=drive_root)
     assert stats["copied_files"] >= 1
     assert dst.read_text() == '{"stage":"b"}'
+
+
+def test_quick_sync_rejects_unsafe_run_id(tmp_path: Path) -> None:
+    local_root = tmp_path / "local"
+    drive_root = tmp_path / "drive"
+    local_root.mkdir(parents=True, exist_ok=True)
+    drive_root.mkdir(parents=True, exist_ok=True)
+
+    with pytest.raises(ValueError):
+        sync_runtime_to_drive(local_root=local_root, drive_path=drive_root, mode="quick", run_id="../bad")

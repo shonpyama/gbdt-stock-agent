@@ -4,6 +4,19 @@ run:
   seed: 42
   log_level: INFO
   timezone_assumption: US/Eastern; events_effective=next_trading_day; fundamentals_available_lag_trading_days=60
+  checkpoint_sync:
+    mode: quick
+    min_interval_seconds: 120
+    use_drive_config_path: false
+    full_stages:
+    - stage_80_report_ready
+  auto_review:
+    enabled: true
+    strict: false
+    stages:
+    - stage_60_predictions_ready
+    - stage_70_backtest_ready
+    - stage_80_report_ready
 runtime:
   gpu_sampling:
     enabled: true

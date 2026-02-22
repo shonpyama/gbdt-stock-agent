@@ -7,6 +7,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from .gpu_runtime import maybe_enable_cudf_pandas
+
+maybe_enable_cudf_pandas()
+
 import pandas as pd
 
 from .colab import restore_runtime_from_drive, sync_runtime_to_drive
@@ -26,6 +30,21 @@ def _project_dir_from_cwd() -> Path:
 
 def _load_cfg(conf_path: str) -> Dict[str, Any]:
     return load_config(Path(conf_path))
+
+
+def _safe_float(value: Any) -> Optional[float]:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
+def _gpu_runtime_from_metrics(metrics: Dict[str, Any]) -> Dict[str, Any]:
+    runtime = metrics.get("runtime") if isinstance(metrics.get("runtime"), dict) else {}
+    gpu = runtime.get("gpu_sampling") if isinstance(runtime.get("gpu_sampling"), dict) else {}
+    return dict(gpu)
 
 
 def cmd_preflight(args: argparse.Namespace) -> int:
@@ -120,6 +139,7 @@ def cmd_report(args: argparse.Namespace) -> int:
         model_metrics=metrics.get("model_metrics"),
         chosen_model=(metrics.get("backtest") or {}).get("chosen_model"),
         backtest_summary=(metrics.get("backtest") or {}).get("summary"),
+        runtime_info=metrics.get("runtime"),
         status=str(metrics.get("status", "unknown")),
         errors=metrics.get("errors"),
         historical_errors=metrics.get("historical_errors"),
@@ -152,13 +172,21 @@ def cmd_migrate_restore(args: argparse.Namespace) -> int:
 
 
 def cmd_colab_restore(args: argparse.Namespace) -> int:
-    stats = restore_runtime_from_drive(drive_path=Path(args.drive_path) if args.drive_path else None)
+    stats = restore_runtime_from_drive(
+        drive_path=Path(args.drive_path) if args.drive_path else None,
+        mode=str(args.mode),
+        run_id=(str(args.run_id).strip() if args.run_id else None),
+    )
     print(json.dumps(stats, indent=2, ensure_ascii=True))
     return 0
 
 
 def cmd_colab_sync(args: argparse.Namespace) -> int:
-    stats = sync_runtime_to_drive(drive_path=Path(args.drive_path) if args.drive_path else None)
+    stats = sync_runtime_to_drive(
+        drive_path=Path(args.drive_path) if args.drive_path else None,
+        mode=str(args.mode),
+        run_id=(str(args.run_id).strip() if args.run_id else None),
+    )
     print(json.dumps(stats, indent=2, ensure_ascii=True))
     return 0
 
@@ -209,6 +237,78 @@ def cmd_ops_gate(args: argparse.Namespace) -> int:
     return 0 if bool(gate.get("ok")) else 1
 
 
+def cmd_gpu_usage(args: argparse.Namespace) -> int:
+    project_dir = _project_dir_from_cwd()
+    paths = ProjectPaths.from_project_dir(project_dir)
+
+    if args.run_id:
+        metrics_path = paths.run_dir(str(args.run_id)) / "metrics.json"
+        if not metrics_path.exists():
+            raise FileNotFoundError(str(metrics_path))
+        metrics = json.loads(metrics_path.read_text())
+        gpu = _gpu_runtime_from_metrics(metrics)
+        out = {
+            "run_id": str(args.run_id),
+            "metrics_path": str(metrics_path),
+            "gpu_sampling": gpu,
+            "active_minutes_per_hour": _safe_float(gpu.get("active_minutes_per_hour")),
+        }
+        print(json.dumps(out, indent=2, ensure_ascii=True))
+        return 0
+
+    lookback_hours = max(0.1, float(args.lookback_hours))
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
+
+    rows = []
+    active_seconds_total = 0.0
+    run_seconds_total = 0.0
+    for run_dir in sorted(paths.artifacts_dir.joinpath("runs").glob("*"), reverse=True):
+        metrics_path = run_dir / "metrics.json"
+        if not metrics_path.exists():
+            continue
+        mtime = datetime.fromtimestamp(metrics_path.stat().st_mtime, tz=timezone.utc)
+        if mtime < cutoff:
+            continue
+        try:
+            metrics = json.loads(metrics_path.read_text())
+        except Exception:
+            continue
+        gpu = _gpu_runtime_from_metrics(metrics)
+        run_seconds = _safe_float(gpu.get("run_seconds_estimate")) or 0.0
+        active_seconds = _safe_float(gpu.get("active_seconds_estimate")) or 0.0
+        if run_seconds <= 0:
+            continue
+        run_id = str(metrics.get("run_id") or run_dir.name)
+        rows.append(
+            {
+                "run_id": run_id,
+                "updated_at": mtime.isoformat(),
+                "run_seconds_estimate": run_seconds,
+                "active_seconds_estimate": active_seconds,
+                "active_minutes_per_hour": _safe_float(gpu.get("active_minutes_per_hour")),
+                "sample_count": int(_safe_float(gpu.get("sample_count")) or 0),
+                "status": metrics.get("status"),
+            }
+        )
+        run_seconds_total += run_seconds
+        active_seconds_total += active_seconds
+
+    active_ratio = (active_seconds_total / run_seconds_total) if run_seconds_total > 0 else 0.0
+    out = {
+        "lookback_hours": lookback_hours,
+        "window_start": cutoff.isoformat(),
+        "runs_considered": len(rows),
+        "run_seconds_total": round(run_seconds_total, 3),
+        "active_seconds_total": round(active_seconds_total, 3),
+        "active_minutes_total": round(active_seconds_total / 60.0, 3),
+        "active_ratio": round(active_ratio, 6),
+        "active_minutes_per_hour": round(active_ratio * 60.0, 3),
+        "runs": rows[: int(max(1, args.max_runs))],
+    }
+    print(json.dumps(out, indent=2, ensure_ascii=True))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="gbdt_agent.cli")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -254,9 +354,13 @@ def build_parser() -> argparse.ArgumentParser:
     colab_sub = p_colab.add_subparsers(dest="colab_cmd", required=True)
     p_cr = colab_sub.add_parser("restore")
     p_cr.add_argument("--drive-path", default="/content/drive/MyDrive/gbdt-stock-agent")
+    p_cr.add_argument("--mode", choices=("full", "quick"), default="full")
+    p_cr.add_argument("--run-id", default=None)
     p_cr.set_defaults(func=cmd_colab_restore)
     p_cs = colab_sub.add_parser("sync")
     p_cs.add_argument("--drive-path", default="/content/drive/MyDrive/gbdt-stock-agent")
+    p_cs.add_argument("--mode", choices=("full", "quick"), default="full")
+    p_cs.add_argument("--run-id", default=None)
     p_cs.set_defaults(func=cmd_colab_sync)
 
     p_ops = sub.add_parser("ops-status")
@@ -276,6 +380,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_ops_gate.add_argument("--policy", default="conf/ops_policy.yaml")
     p_ops_gate.add_argument("--no-incident", action="store_true")
     p_ops_gate.set_defaults(func=cmd_ops_gate)
+
+    p_gpu = sub.add_parser("gpu-usage")
+    p_gpu.add_argument("--run-id", default=None)
+    p_gpu.add_argument("--lookback-hours", type=float, default=24.0)
+    p_gpu.add_argument("--max-runs", type=int, default=50)
+    p_gpu.set_defaults(func=cmd_gpu_usage)
 
     return p
 

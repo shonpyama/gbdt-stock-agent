@@ -6,11 +6,19 @@ import json
 import logging
 import os
 import re
+import time
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence
 
+from .auto_review import build_auto_review, write_auto_review
+from .gpu_runtime import dataframe_backend_state, maybe_enable_cudf_pandas
+from .gpu_monitor import GPUSampler
+
+maybe_enable_cudf_pandas()
+
+import numpy as np
 import pandas as pd
 
 from .backtest import run_backtest
@@ -85,6 +93,101 @@ def _summarize_error(exc: BaseException) -> Dict[str, Any]:
         "message": str(exc)[:600],
         "traceback": traceback.format_exc(limit=50),
     }
+
+
+def _apply_feature_quality_filter(
+    *,
+    merged: pd.DataFrame,
+    feature_cols: Sequence[str],
+    train_dates: Sequence,
+    min_finite_ratio: float,
+    min_nonzero_ratio: float,
+    min_std: float,
+    nonzero_eps: float,
+) -> tuple[list[str], Dict[str, Any]]:
+    cols = [str(c) for c in feature_cols]
+    if not cols:
+        return [], {"enabled": False, "kept_count": 0, "dropped_count": 0}
+
+    if min_finite_ratio <= 0.0 and min_nonzero_ratio <= 0.0 and min_std <= 0.0:
+        return cols, {"enabled": False, "kept_count": len(cols), "dropped_count": 0}
+
+    train = merged[merged["decision_date"].isin(train_dates)].copy()
+    kept: list[str] = []
+    dropped: list[Dict[str, Any]] = []
+
+    for c in cols:
+        s = pd.to_numeric(train[c], errors="coerce")
+        finite_mask = np.isfinite(s.to_numpy(dtype=float, copy=False))
+        finite_n = int(finite_mask.sum())
+        finite_ratio = float(finite_n / max(1, len(train)))
+        if finite_n <= 0:
+            dropped.append(
+                {
+                    "feature": c,
+                    "reason": "no_finite_values",
+                    "finite_count": 0,
+                    "finite_ratio": 0.0,
+                    "nonzero_ratio": None,
+                    "std": None,
+                }
+            )
+            continue
+        if finite_ratio < float(min_finite_ratio):
+            dropped.append(
+                {
+                    "feature": c,
+                    "reason": "low_finite_ratio",
+                    "finite_count": finite_n,
+                    "finite_ratio": finite_ratio,
+                    "nonzero_ratio": None,
+                    "std": None,
+                }
+            )
+            continue
+
+        x = s.to_numpy(dtype=float, copy=False)[finite_mask]
+        nonzero_ratio = float(np.mean(np.abs(x) > float(nonzero_eps)))
+        std_val = float(np.std(x))
+
+        if nonzero_ratio < float(min_nonzero_ratio):
+            dropped.append(
+                {
+                    "feature": c,
+                    "reason": "low_nonzero_ratio",
+                    "finite_count": finite_n,
+                    "finite_ratio": finite_ratio,
+                    "nonzero_ratio": nonzero_ratio,
+                    "std": std_val,
+                }
+            )
+            continue
+        if std_val < float(min_std):
+            dropped.append(
+                {
+                    "feature": c,
+                    "reason": "low_std",
+                    "finite_count": finite_n,
+                    "finite_ratio": finite_ratio,
+                    "nonzero_ratio": nonzero_ratio,
+                    "std": std_val,
+                }
+            )
+            continue
+        kept.append(c)
+
+    summary: Dict[str, Any] = {
+        "enabled": True,
+        "min_finite_ratio": float(min_finite_ratio),
+        "min_nonzero_ratio": float(min_nonzero_ratio),
+        "min_std": float(min_std),
+        "nonzero_eps": float(nonzero_eps),
+        "before_count": int(len(cols)),
+        "kept_count": int(len(kept)),
+        "dropped_count": int(len(dropped)),
+        "dropped_examples": dropped[:25],
+    }
+    return kept, summary
 
 
 def _stage_artifacts_exist(
@@ -237,6 +340,7 @@ def run_pipeline(
         "status": "running",
         "errors": [],
         "historical_errors": [],
+        "runtime": {"dataframe_backend": dataframe_backend_state()},
     }
 
     metrics_path = run_dir / "metrics.json"
@@ -250,6 +354,11 @@ def run_pipeline(
             # Keep only active errors for the current execution attempt.
             old["errors"] = []
             metrics = old
+    runtime_info = metrics.get("runtime")
+    if not isinstance(runtime_info, dict):
+        runtime_info = {}
+        metrics["runtime"] = runtime_info
+    runtime_info["dataframe_backend"] = dataframe_backend_state()
 
     state_payload: Dict[str, Any] = {
         "run_id": run_id,
@@ -287,23 +396,102 @@ def run_pipeline(
     horizon = int((cfg.get("labels") or {}).get("horizon_trading_days", 20))
     target_col = str((cfg.get("labels") or {}).get("target_col", f"future_return_{horizon}d"))
     run_cfg = cfg.get("run") or {}
-    checkpoint_drive_raw = str(run_cfg.get("checkpoint_drive_path") or os.environ.get("GBDT_CHECKPOINT_DRIVE_PATH", "")).strip()
+    drive_cfg = cfg.get("drive") if isinstance(cfg.get("drive"), dict) else {}
+    checkpoint_sync_cfg = run_cfg.get("checkpoint_sync") if isinstance(run_cfg.get("checkpoint_sync"), dict) else {}
+    checkpoint_sync_use_drive_cfg = bool(checkpoint_sync_cfg.get("use_drive_config_path", False))
+    checkpoint_drive_raw = str(
+        run_cfg.get("checkpoint_drive_path")
+        or os.environ.get("GBDT_CHECKPOINT_DRIVE_PATH", "")
+        or (
+            (drive_cfg.get("drive_path") if bool(drive_cfg.get("enabled", False)) else "")
+            if checkpoint_sync_use_drive_cfg
+            else ""
+        )
+    ).strip()
     checkpoint_drive_path = Path(checkpoint_drive_raw) if checkpoint_drive_raw else None
     if checkpoint_drive_path:
         metrics["checkpoint_drive_path"] = str(checkpoint_drive_path)
+    checkpoint_sync_default_mode = str(checkpoint_sync_cfg.get("mode", "quick")).strip().lower()
+    if checkpoint_sync_default_mode not in {"quick", "full"}:
+        checkpoint_sync_default_mode = "quick"
+    checkpoint_sync_min_interval = max(0.0, float(checkpoint_sync_cfg.get("min_interval_seconds", 0.0)))
+    checkpoint_sync_full_stages = set(
+        str(x).strip()
+        for x in (checkpoint_sync_cfg.get("full_stages") or ["stage_80_report_ready"])
+        if str(x).strip()
+    )
+    last_checkpoint_sync_at = 0.0
+
+    auto_review_cfg = run_cfg.get("auto_review") if isinstance(run_cfg.get("auto_review"), dict) else {}
+    auto_review_enabled = bool(auto_review_cfg.get("enabled", True))
+    auto_review_strict = bool(auto_review_cfg.get("strict", False))
+    auto_review_stages = set(
+        str(x).strip()
+        for x in (
+            auto_review_cfg.get("stages")
+            or ["stage_60_predictions_ready", "stage_70_backtest_ready", "stage_80_report_ready"]
+        )
+        if str(x).strip()
+    )
+
+    runtime_cfg = (cfg.get("runtime") or {}).get("gpu_sampling") or {}
+    gpu_sampler = GPUSampler(
+        enabled=bool(runtime_cfg.get("enabled", True)),
+        sample_interval_sec=float(runtime_cfg.get("sample_interval_sec", 1.0)),
+        active_util_threshold=float(runtime_cfg.get("active_util_threshold", 5.0)),
+        active_mem_threshold_mib=float(runtime_cfg.get("active_mem_threshold_mib", 128.0)),
+    )
+    metrics["runtime"]["gpu_sampling"] = gpu_sampler.start(log_path=run_dir / "logs" / "gpu_samples.csv")
+    gpu_sampling_finalized = False
+
+    def _finalize_gpu_sampling() -> None:
+        nonlocal gpu_sampling_finalized
+        if gpu_sampling_finalized:
+            return
+        gpu_sampling_finalized = True
+        try:
+            metrics.setdefault("runtime", {})["gpu_sampling"] = gpu_sampler.stop()
+        except Exception as exc:
+            logger.warning("gpu_sampling_finalize_failed err=%s", exc)
 
     def _checkpoint_sync(stage: str) -> None:
+        nonlocal last_checkpoint_sync_at
         if checkpoint_drive_path is None:
             return
         log_path = run_dir / "logs" / "checkpoint_sync.log"
+        mode = "full" if stage in checkpoint_sync_full_stages else checkpoint_sync_default_mode
+        now_ts = time.time()
+        if mode != "full" and checkpoint_sync_min_interval > 0:
+            elapsed = now_ts - last_checkpoint_sync_at
+            if elapsed < checkpoint_sync_min_interval:
+                rec = {
+                    "ts": _utc_iso(),
+                    "stage": stage,
+                    "drive_path": str(checkpoint_drive_path),
+                    "mode": mode,
+                    "skipped": True,
+                    "reason": "min_interval_not_elapsed",
+                    "elapsed_seconds": round(elapsed, 3),
+                    "min_interval_seconds": checkpoint_sync_min_interval,
+                }
+                with log_path.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps(rec, ensure_ascii=True) + "\n")
+                return
         try:
             from .colab import sync_runtime_to_drive
 
-            stats = sync_runtime_to_drive(local_root=project_dir, drive_path=checkpoint_drive_path)
+            stats = sync_runtime_to_drive(
+                local_root=project_dir,
+                drive_path=checkpoint_drive_path,
+                mode=mode,
+                run_id=run_id,
+            )
+            last_checkpoint_sync_at = time.time()
             rec = {
                 "ts": _utc_iso(),
                 "stage": stage,
                 "drive_path": str(checkpoint_drive_path),
+                "mode": mode,
                 "copied_files": int(stats.get("copied_files", 0)),
             }
             with log_path.open("a", encoding="utf-8") as f:
@@ -313,11 +501,43 @@ def run_pipeline(
                 "ts": _utc_iso(),
                 "stage": stage,
                 "drive_path": str(checkpoint_drive_path),
+                "mode": mode,
                 "error": f"{type(exc).__name__}: {exc}",
             }
             logger.warning("checkpoint_sync_failed stage=%s err=%s", stage, rec["error"])
             with log_path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(rec, ensure_ascii=True) + "\n")
+
+    def _run_auto_review(stage: str) -> None:
+        if not auto_review_enabled or stage not in auto_review_stages:
+            return
+        log_path = run_dir / "logs" / "auto_review.log"
+        try:
+            payload = build_auto_review(run_id=run_id, stage=stage, run_dir=run_dir, metrics=metrics)
+            out_path = write_auto_review(run_dir=run_dir, payload=payload)
+            metrics["auto_review"] = payload
+            rec = {
+                "ts": _utc_iso(),
+                "stage": stage,
+                "status": str(payload.get("status", "unknown")),
+                "warnings": len(payload.get("warnings") or []),
+                "criticals": len(payload.get("criticals") or []),
+                "path": str(out_path),
+            }
+            with log_path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=True) + "\n")
+            if auto_review_strict and str(payload.get("status")) == "fail":
+                raise RuntimeError(f"auto_review_failed stage={stage} path={out_path}")
+        except Exception as exc:  # pragma: no cover
+            rec = {
+                "ts": _utc_iso(),
+                "stage": stage,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+            with log_path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=True) + "\n")
+            if auto_review_strict:
+                raise
 
     def _save_state(stage: str) -> None:
         state_payload["stage"] = stage
@@ -345,6 +565,7 @@ def run_pipeline(
             model_metrics=metrics.get("model_metrics"),
             chosen_model=(metrics.get("backtest") or {}).get("chosen_model"),
             backtest_summary=(metrics.get("backtest") or {}).get("summary"),
+            runtime_info=metrics.get("runtime"),
             status=status,
             errors=report_errors,
             historical_errors=metrics.get("historical_errors"),
@@ -427,14 +648,29 @@ def run_pipeline(
         earnings_path = raw_dir / "earnings.parquet"
         splits_path = raw_dir / "splits.parquet"
         dividends_path = raw_dir / "dividends.parquet"
+        financials_path = raw_dir / "financials_quarterly.parquet"
         news_path = raw_dir / "news.parquet"
+        macro_treasury_path = raw_dir / "macro_treasury.parquet"
+        macro_calendar_path = raw_dir / "macro_calendar.parquet"
+        analyst_path = raw_dir / "analyst_premium.parquet"
         earnings = pd.read_parquet(earnings_path) if earnings_path.exists() else pd.DataFrame()
         splits_df = pd.read_parquet(splits_path) if splits_path.exists() else pd.DataFrame()
         dividends_df = pd.read_parquet(dividends_path) if dividends_path.exists() else pd.DataFrame()
+        financials = pd.read_parquet(financials_path) if financials_path.exists() else pd.DataFrame()
         include_news = bool((cfg.get("data") or {}).get("include_news", False))
+        include_macro = bool((cfg.get("data") or {}).get("include_macro", True))
+        include_analyst = bool((cfg.get("data") or {}).get("include_analyst", False))
         news: Optional[pd.DataFrame] = None
         if include_news:
             news = pd.read_parquet(news_path) if news_path.exists() else pd.DataFrame()
+        macro_treasury: Optional[pd.DataFrame] = None
+        macro_calendar: Optional[pd.DataFrame] = None
+        if include_macro:
+            macro_treasury = pd.read_parquet(macro_treasury_path) if macro_treasury_path.exists() else pd.DataFrame()
+            macro_calendar = pd.read_parquet(macro_calendar_path) if macro_calendar_path.exists() else pd.DataFrame()
+        analyst: Optional[pd.DataFrame] = None
+        if include_analyst:
+            analyst = pd.read_parquet(analyst_path) if analyst_path.exists() else pd.DataFrame()
 
         # Stage 20
         if _should_run("stage_20_validation_passed"):
@@ -489,6 +725,14 @@ def run_pipeline(
             )
             if "news" in inspect.signature(build_feature_store).parameters:
                 feature_kwargs["news"] = news
+            if "financials" in inspect.signature(build_feature_store).parameters:
+                feature_kwargs["financials"] = financials if not financials.empty else None
+            if "macro_treasury" in inspect.signature(build_feature_store).parameters:
+                feature_kwargs["macro_treasury"] = macro_treasury
+            if "macro_calendar" in inspect.signature(build_feature_store).parameters:
+                feature_kwargs["macro_calendar"] = macro_calendar
+            if "analyst" in inspect.signature(build_feature_store).parameters:
+                feature_kwargs["analyst"] = analyst
             feature_res = build_feature_store(**feature_kwargs)
             metrics["feature_store_id"] = feature_res.feature_store_id
             state_payload["feature_store_id"] = feature_res.feature_store_id
@@ -604,6 +848,11 @@ def run_pipeline(
         fcfg = cfg.get("features") or {}
         exclude_prefixes = [str(x) for x in (fcfg.get("exclude_prefixes") or []) if str(x)]
         exclude_regex = [str(x) for x in (fcfg.get("exclude_regex") or []) if str(x)]
+        feature_selection_meta: Dict[str, Any] = {
+            "before_count": int(len(feature_cols)),
+            "exclude_prefixes": exclude_prefixes,
+            "exclude_regex": exclude_regex,
+        }
         regexes = []
         for patt in exclude_regex:
             try:
@@ -622,14 +871,26 @@ def run_pipeline(
                 return True
 
             feature_cols = [c for c in before if _keep_feature(c)]
-            metrics["feature_selection"] = {
-                "exclude_prefixes": exclude_prefixes,
-                "exclude_regex": exclude_regex,
-                "before_count": int(len(before)),
-                "after_count": int(len(feature_cols)),
-            }
+            feature_selection_meta["after_exclude_count"] = int(len(feature_cols))
+
+        min_finite_ratio = max(0.0, float(fcfg.get("min_finite_ratio", 0.0) or 0.0))
+        min_nonzero_ratio = max(0.0, float(fcfg.get("min_nonzero_ratio", 0.0) or 0.0))
+        min_std = max(0.0, float(fcfg.get("min_std", 0.0) or 0.0))
+        nonzero_eps = max(0.0, float(fcfg.get("nonzero_eps", 1e-12) or 1e-12))
+        feature_cols, quality_summary = _apply_feature_quality_filter(
+            merged=merged,
+            feature_cols=feature_cols,
+            train_dates=train_ds,
+            min_finite_ratio=min_finite_ratio,
+            min_nonzero_ratio=min_nonzero_ratio,
+            min_std=min_std,
+            nonzero_eps=nonzero_eps,
+        )
+        feature_selection_meta["quality_filter"] = quality_summary
+        feature_selection_meta["after_count"] = int(len(feature_cols))
+        metrics["feature_selection"] = feature_selection_meta
         if not feature_cols:
-            raise RuntimeError("No features selected after applying features.exclude_* filters")
+            raise RuntimeError("No features selected after applying features selection filters")
 
         # Stage 50
         if _should_run("stage_50_models_trained"):
@@ -683,6 +944,8 @@ def run_pipeline(
 
         _save_state("stage_60_predictions_ready")
         _write_metrics()
+        _run_auto_review("stage_60_predictions_ready")
+        _write_metrics()
         if _stop_if_needed("stage_60_predictions_ready"):
             return run_id
 
@@ -719,6 +982,8 @@ def run_pipeline(
 
         _save_state("stage_70_backtest_ready")
         _write_metrics()
+        _run_auto_review("stage_70_backtest_ready")
+        _write_metrics()
         if _stop_if_needed("stage_70_backtest_ready"):
             return run_id
 
@@ -727,9 +992,12 @@ def run_pipeline(
             hist = metrics.get("historical_errors") if isinstance(metrics.get("historical_errors"), list) else []
             metrics["historical_errors"] = (hist + metrics["errors"])[-200:]
             metrics["errors"] = []
+        _finalize_gpu_sampling()
         metrics["status"] = "success"
         _write_metrics()
         _write_report("SUCCESS")
+        _run_auto_review("stage_80_report_ready")
+        _write_metrics()
         _save_state("stage_80_report_ready")
         _write_metrics()
         return run_id
@@ -738,6 +1006,7 @@ def run_pipeline(
         raise
     except Exception as exc:
         logger.exception("pipeline_failed")
+        _finalize_gpu_sampling()
         err = _summarize_error(exc)
         err["stage"] = state_payload.get("stage")
         metrics["status"] = "error"
@@ -752,6 +1021,11 @@ def run_pipeline(
         _write_json(err_dir / f"{_utc_ts()}_{run_id}.json", {"run_id": run_id, "error": err})
         raise
     finally:
+        try:
+            _finalize_gpu_sampling()
+            _write_metrics()
+        except Exception:
+            pass
         try:
             release_lock(paths.state_dir)
         except Exception:
